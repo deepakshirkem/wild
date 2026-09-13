@@ -5,6 +5,7 @@ use crate::arch::Architecture;
 use crate::args::BSymbolicKind;
 use crate::args::RelocationModel;
 use crate::args::elf::BuildIdOption;
+use crate::args::elf::CetReport;
 use crate::args::elf::ElfArgs;
 use crate::bail;
 use crate::debug_assert_bail;
@@ -4303,7 +4304,7 @@ pub(crate) enum PropertyClass {
     AndOr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GnuProperty {
     pub(crate) ptype: object::elf::GnuPropertyType,
     pub(crate) data: u32,
@@ -4384,6 +4385,17 @@ impl LayoutExt {
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
         let gnu_property_notes = merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa);
+        if args.force_ibt || args.cet_report.is_some() {
+            let cet_data: Vec<(String, Vec<GnuProperty>)> = objects_iter(groups)
+                .map(|o| {
+                    (
+                        o.input.file.filename.to_string_lossy().into_owned(),
+                        o.format_specific.gnu_property_notes.clone(),
+                    )
+                })
+                .collect();
+            check_cet_properties(&cet_data, args)?;
+        }
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
         let eflags = merge_eflags::<C, A>(objects_iter(groups).map(|o| o.object))?;
         let has_eh_frame_input = objects_iter(groups).any(|o| o.format_specific.has_eh_frame_input);
@@ -4404,6 +4416,53 @@ impl LayoutExt {
             0
         }
     }
+}
+
+fn check_cet_properties(objects: &[(String, Vec<GnuProperty>)], args: &ElfArgs) -> Result {
+    use object::elf::GNU_PROPERTY_X86_FEATURE_1_IBT;
+    use object::elf::GNU_PROPERTY_X86_FEATURE_1_SHSTK;
+
+    for (filename, props) in objects {
+        let props = props.as_slice();
+
+        // Get the feature bits for this file
+        let feature_bits = props
+            .iter()
+            .find(|p| p.ptype == object::elf::GNU_PROPERTY_X86_FEATURE_1_AND)
+            .map_or(0, |p| p.data);
+
+        if args.force_ibt && (feature_bits & GNU_PROPERTY_X86_FEATURE_1_IBT == 0) {
+            args.warning(format!(
+                "{filename}: -z force-ibt: file does not have GNU_PROPERTY_X86_FEATURE_1_IBT property"
+            ));
+        }
+
+        if let Some(cet_report) = args.cet_report
+            && cet_report != crate::args::elf::CetReport::None
+        {
+            for (bit, name) in [
+                (
+                    GNU_PROPERTY_X86_FEATURE_1_IBT,
+                    "GNU_PROPERTY_X86_FEATURE_1_IBT",
+                ),
+                (
+                    GNU_PROPERTY_X86_FEATURE_1_SHSTK,
+                    "GNU_PROPERTY_X86_FEATURE_1_SHSTK",
+                ),
+            ] {
+                if feature_bits & bit == 0 {
+                    let msg =
+                        format!("{filename}: -z cet-report: file does not have {name} property");
+                    match cet_report {
+                        CetReport::Warning => args.warning(msg),
+                        CetReport::Error => bail!("{msg}"),
+                        CetReport::None => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
