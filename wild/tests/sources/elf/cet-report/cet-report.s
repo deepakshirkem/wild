@@ -1,5 +1,6 @@
 # Test -z force-ibt and -z cet-report flags for CET property reporting.
 # CET (Control-flow Enforcement Technology) is x86-64 specific.
+# Input object has no GNU property notes, so output has no .note.gnu.property.
 //#AbstractConfig:default
 //#Arch:x86_64
 //#Mode:static

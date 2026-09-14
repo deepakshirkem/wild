@@ -4385,16 +4385,11 @@ impl LayoutExt {
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
         let gnu_property_notes = merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa);
-        if args.force_ibt || args.cet_report.is_some() {
-            let cet_data: Vec<(String, Vec<GnuProperty>)> = objects_iter(groups)
-                .map(|o| {
-                    (
-                        o.input.file.filename.to_string_lossy().into_owned(),
-                        o.format_specific.gnu_property_notes.clone(),
-                    )
-                })
-                .collect();
-            check_cet_properties(&cet_data, args)?;
+        if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
+            for obj in objects_iter(groups) {
+                let filename = obj.input.file.filename.to_string_lossy();
+                check_cet_properties(&filename, &obj.format_specific.gnu_property_notes, args)?;
+            }
         }
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
         let eflags = merge_eflags::<C, A>(objects_iter(groups).map(|o| o.object))?;
@@ -4418,13 +4413,11 @@ impl LayoutExt {
     }
 }
 
-fn check_cet_properties(objects: &[(String, Vec<GnuProperty>)], args: &ElfArgs) -> Result {
+fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -> Result {
     use object::elf::GNU_PROPERTY_X86_FEATURE_1_IBT;
     use object::elf::GNU_PROPERTY_X86_FEATURE_1_SHSTK;
 
-    for (filename, props) in objects {
-        let props = props.as_slice();
-
+    {
         // Get the feature bits for this file
         let feature_bits = props
             .iter()
@@ -4437,9 +4430,7 @@ fn check_cet_properties(objects: &[(String, Vec<GnuProperty>)], args: &ElfArgs) 
             ));
         }
 
-        if let Some(cet_report) = args.cet_report
-            && cet_report != crate::args::elf::CetReport::None
-        {
+        if args.cet_report != crate::args::elf::CetReport::None {
             for (bit, name) in [
                 (
                     GNU_PROPERTY_X86_FEATURE_1_IBT,
@@ -4453,7 +4444,7 @@ fn check_cet_properties(objects: &[(String, Vec<GnuProperty>)], args: &ElfArgs) 
                 if feature_bits & bit == 0 {
                     let msg =
                         format!("{filename}: -z cet-report: file does not have {name} property");
-                    match cet_report {
+                    match args.cet_report {
                         CetReport::Warning => args.warning(msg),
                         CetReport::Error => bail!("{msg}"),
                         CetReport::None => unreachable!(),
