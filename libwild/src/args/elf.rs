@@ -126,7 +126,7 @@ pub struct ElfArgs {
     pub(crate) z_interpose: bool,
     pub(crate) z_isa: Option<NonZeroU32>,
     pub(crate) force_ibt: bool,
-    pub(crate) cet_report: Option<CetReport>,
+    pub(crate) cet_report: CetReport,
     pub(crate) z_stack_size: Option<NonZeroU64>,
     pub(crate) z_pack_relative_relocs: bool,
     pub(crate) max_page_size: Option<Alignment>,
@@ -406,7 +406,7 @@ impl Default for ElfArgs {
             z_stack_size: None,
             z_isa: None,
             force_ibt: false,
-            cet_report: None,
+            cet_report: CetReport::None,
             z_pack_relative_relocs: false,
             max_page_size: None,
             auxiliary: Vec::new(),
@@ -823,11 +823,9 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
             "cet-report=",
             "Report missing CET properties",
             |args, _, value| {
-                args.cet_report = Some(
-                    value
-                        .parse::<CetReport>()
-                        .map_err(|_| crate::error!("unknown -z cet-report= value '{value}'"))?,
-                );
+                args.cet_report = value
+                    .parse::<CetReport>()
+                    .map_err(|_| crate::error!("unknown -z cet-report= value '{value}'"))?;
                 Ok(())
             },
         )
