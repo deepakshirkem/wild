@@ -113,6 +113,10 @@
 //! ExpectSectionBytes:{section_name}=0x{hex_bytes} [start_range..end_range] Checks that the
 //! specified section contains exactly the given bytes.
 //!
+//! ExpectInstructions:{section_name} {offset} {instructions} Asserts that the section at the
+//! given offset contains the supplied instructions. Instructions are assembled with the test's
+//! compiler and flags. Multiple instructions can be separated by semicolons.
+//!
 //! ExpectGdbIndexCuCount:{count} Checks that the `.gdb_index` section contains exactly the
 //! specified number of CU entries.
 //!
@@ -1424,6 +1428,7 @@ struct Config {
     config_name: String,
     variant_num: Option<u32>,
     assertions: Assertions,
+    expected_instructions: Vec<ExpectedInstructions>,
     linker_driver: LinkerDriver,
     linker_args: ArgumentSet,
     post_linker_args: ArgumentSet,
@@ -2008,6 +2013,13 @@ struct Assertions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedInstructions {
+    section_name: String,
+    offset: usize,
+    instructions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ExpectedSectionBytes {
     section_name: String,
     expected_bytes: Vec<u8>,
@@ -2212,6 +2224,7 @@ impl Config {
             config_name: "default".to_owned(),
             variant_num: None,
             assertions: Default::default(),
+            expected_instructions: Vec::new(),
             linker_driver: LinkerDriver::Direct(DirectConfig::default()),
             linker_args: platform.default_args_for_linking(),
             post_linker_args: ArgumentSet::empty(),
@@ -2640,6 +2653,27 @@ fn process_directive(
         "ExpectGdbIndexDistinctAddrCus" => {
             config.assertions.expected_gdb_index_distinct_addr_cus =
                 Some(arg.trim().parse::<usize>()?);
+        }
+        "ExpectInstructions" => {
+            let (section_name, rest) = arg
+                .split_once(char::is_whitespace)
+                .context("ExpectInstructions requires a section and offset")?;
+
+            let (offset, instructions) = rest
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .context("ExpectInstructions requires instructions")?;
+
+            ensure!(
+                !instructions.trim().is_empty(),
+                "ExpectInstructions requires instructions"
+            );
+
+            config.expected_instructions.push(ExpectedInstructions {
+                section_name: section_name.to_owned(),
+                offset: parse_number(offset)?.try_into()?,
+                instructions: instructions.to_owned(),
+            });
         }
         "ExpectSectionBytes" => {
             let (section_name, hex_str) = arg.split_once('=').with_context(|| {
@@ -5426,15 +5460,23 @@ impl Assertions {
             let section = obj
                 .section_by_name(&expected.section_name)
                 .with_context(|| format!("Section `{}` not found", expected.section_name))?;
+
             let data = if let Some(range) = &expected.match_range {
-                &section.data()?[range.clone()]
+                section.data()?.get(range.clone()).with_context(|| {
+                    format!(
+                        "Section `{}` range {range:?} is out of bounds",
+                        expected.section_name
+                    )
+                })?
             } else {
                 section.data()?
             };
+
             ensure!(
                 data == expected.expected_bytes.as_slice(),
-                "Section `{}` bytes mismatch: expected {:02x?}, got {:02x?}",
+                "Section `{}` at offset {} bytes mismatch: expected {:02x?}, got {:02x?}",
                 expected.section_name,
+                expected.match_range.as_ref().map_or(0, |range| range.start),
                 expected.expected_bytes,
                 data,
             );
@@ -7514,6 +7556,85 @@ fn available_linkers_for_wasm() -> Vec<Linker> {
     linkers
 }
 
+impl ExpectedInstructions {
+    fn assemble(
+        &self,
+        config: &Config,
+        cross_arch: Option<Architecture>,
+        index: usize,
+    ) -> Result<ExpectedSectionBytes> {
+        let source_path = config
+            .build_dir()
+            .join(format!("expected-instructions-{index}.s"));
+
+        let source = format!(".text\n{}\n", self.instructions.replace(';', "\n"));
+
+        if std::fs::read_to_string(&source_path).ok().as_deref() != Some(&source) {
+            std::fs::write(&source_path, &source)?;
+        }
+
+        let object = build_obj(
+            &FilenameArgumentPair::new(&source_path, ArgumentSet::empty()),
+            config,
+            &Linker::Wild,
+            InputType::Object,
+            cross_arch,
+        )?;
+
+        let bytes = std::fs::read(&object.path)?;
+        let obj = object::File::parse(bytes.as_slice())?;
+
+        let section = obj
+            .section_by_name(".text")
+            .context("Expected instructions have no text section")?;
+
+        ensure!(
+            section.relocations().next().is_none(),
+            "Expected instructions contain unresolved relocations; use explicit displacements or local labels"
+        );
+
+        let expected_bytes = section.data()?.to_vec();
+
+        ensure!(
+            !expected_bytes.is_empty(),
+            "Expected instructions assembled to no bytes"
+        );
+
+        let end = self
+            .offset
+            .checked_add(expected_bytes.len())
+            .context("Expected instruction range overflows")?;
+
+        Ok(ExpectedSectionBytes {
+            section_name: self.section_name.clone(),
+            expected_bytes,
+            match_range: Some(self.offset..end),
+        })
+    }
+}
+
+fn prepare_expected_instructions(config: &mut Config, cross_arch: Option<Architecture>) -> Result {
+    if config.expected_instructions.is_empty() {
+        return Ok(());
+    }
+
+    let assembly_config = config.config_for_deps();
+
+    for (index, expected) in config.expected_instructions.iter().enumerate() {
+        let assertion = expected
+            .assemble(&assembly_config, cross_arch, index)
+            .with_context(|| {
+                format!(
+                    "ExpectInstructions:{} {} {}",
+                    expected.section_name, expected.offset, expected.instructions
+                )
+            })?;
+        config.assertions.expected_section_bytes.push(assertion);
+    }
+
+    Ok(())
+}
+
 fn run_with_config(
     program_inputs: &ProgramInputs,
     config: &Config,
@@ -7811,6 +7932,7 @@ fn run_integration_test(
         )
     })?;
 
+    prepare_expected_instructions(&mut config, cross_arch)?;
     run_with_config(program_inputs, &config, cross_arch)?;
 
     Ok(libtest_mimic::Completion::Completed)

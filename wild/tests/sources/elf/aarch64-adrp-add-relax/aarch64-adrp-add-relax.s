@@ -10,8 +10,8 @@
 //#LinkArgs:--no-gc-sections -Ttext=0x200ffc
 //#RunEnabled:false
 //#DiffIgnore:file-header.entry
-//#ExpectSectionBytes:.text=0x1f2003d5 0..4
-//#ExpectSectionBytes:.text=0x1f2003d5 8..12
+//#ExpectInstructions:.text 0 nop
+//#ExpectInstructions:.text 8 nop
 
 .globl _start
 _start:

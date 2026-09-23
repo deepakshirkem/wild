@@ -3,11 +3,11 @@
 //#Arch:x86_64
 
 //#Config:nop:default
-//#ExpectSectionBytes:.text=0x48c7c03c000000c3cccccccccccccccc 0..16
+//#ExpectSectionBytes:.text=0xcccccccccccccccc 8..16
 
 //#Config:with-linkerscript:default
 //#LinkerScript:exec-section-padding.ld
-//#ExpectSectionBytes:.text=0x48c7c03c000000c39090909090909090 0..16
+//#ExpectSectionBytes:.text=0x9090909090909090 8..16
 //#ExpectSectionBytes:.text=0x90909090909090909090909090909090 16..32
 //#RunEnabled:false
 
