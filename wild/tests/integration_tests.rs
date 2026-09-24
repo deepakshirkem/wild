@@ -1325,7 +1325,7 @@ impl Architecture {
     }
 
     fn parse(name: &str) -> Result<Architecture> {
-        Self::from_str(name).map_err(|_| error!("Unknown arch '{name}'"))
+        Self::from_str(name).with_context(|| format!("Unknown arch '{name}'"))
     }
 }
 
@@ -2458,8 +2458,8 @@ fn process_directive(
             }
 
             let name = if let Some((name, inherit)) = arg.split_once(':') {
-                let inherit_index = config_name_to_index.get(inherit).ok_or_else(|| {
-                    error!("Config `{name}` inherits from unknown config named `{inherit}`")
+                let inherit_index = config_name_to_index.get(inherit).with_context(|| {
+                    format!("Config `{name}` inherits from unknown config named `{inherit}`")
                 })?;
 
                 *config = configs[*inherit_index].clone();
@@ -2532,7 +2532,9 @@ fn process_directive(
                     .iter()
                     .find(|l| l.name() == arg)
                     .cloned()
-                    .ok_or_else(|| error!("Unknown linker specified for SoSingleLinker: {arg}"))?,
+                    .with_context(|| {
+                        format!("Unknown linker specified for SoSingleLinker: {arg}")
+                    })?,
             );
         }
         "LinkerDriver" => {
@@ -2810,7 +2812,7 @@ fn process_directive(
         }
         "SecEquiv" => config.section_equiv.push(
             arg.split_once('=')
-                .ok_or_else(|| error!("DiffIgnore missing '='"))
+                .context("DiffIgnore missing '='")
                 .map(|(a, b)| (a.to_owned(), b.to_owned()))?,
         ),
         "AutoAddObjects" => config.auto_add_objects = arg.parse()?,
@@ -4522,8 +4524,8 @@ impl LinkCommand {
                             }
                         }
                         PlatformKind::MachO => {
-                            let (_, sdk) = macos_toolchain()
-                                .map_err(|err| error!("Unable to locate macOS toolchain: {err}"))?;
+                            let (_, sdk) =
+                                macos_toolchain().context("Unable to locate macOS toolchain")?;
                             command.arg("-syslibroot").arg(sdk).arg("-lSystem");
                             if linker.is_lld() {
                                 let arch = cross_arch.unwrap_or(arch);
@@ -6394,7 +6396,8 @@ fn verify_macho_tlv_descriptor_bindings(obj: &object::File, bytes: &[u8]) -> Res
             .context("Invalid chained fixups segment index")?;
         let segment_data = segment
             .data(e, bytes)
-            .map_err(|()| error!("Invalid Mach-O segment data"))?;
+            .ok()
+            .context("Invalid Mach-O segment data")?;
         for fixup in chained_segment.fixups(e, load_addr, segment_data) {
             let (offset, fixup) = fixup?;
             let address = segment
@@ -7506,8 +7509,7 @@ fn available_linkers_for_linux() -> Result<Vec<Linker>> {
 
 fn available_linkers_for_mac() -> Result<LinkerCatalog> {
     let mut linkers = Vec::new();
-    let (path, _) = macos_toolchain()
-        .map_err(|reason| error!("Apple linker `ld` is required for Mach-O tests: {reason}"))?;
+    let (path, _) = macos_toolchain().context("Apple linker `ld` is required for Mach-O tests")?;
 
     linkers.push(Linker::ThirdParty(ThirdPartyLinker {
         name: "ld",

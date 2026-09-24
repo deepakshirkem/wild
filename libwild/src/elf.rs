@@ -11,7 +11,6 @@ use crate::bail;
 use crate::debug_assert_bail;
 use crate::elf_writer;
 use crate::ensure;
-use crate::error;
 use crate::error::Context as _;
 use crate::error::Result;
 use crate::expression_eval;
@@ -199,7 +198,8 @@ pub(crate) trait ElfWord: Copy + FromBytes + IntoBytes + Into<u64> + Send + Sync
 
 impl ElfWord for u32 {
     fn from_u64(value: u64) -> Result<Self> {
-        u32::try_from(value).map_err(|_| error!("ELF word value 0x{value:x} does not fit in ELF32"))
+        u32::try_from(value)
+            .with_context(|| format!("ELF word value 0x{value:x} does not fit in ELF32"))
     }
 
     fn from_le_bytes(bytes: &[u8]) -> Self {
@@ -3471,7 +3471,7 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
         for note in notes {
             for gnu_property in note?
                 .gnu_properties(e)
-                .ok_or(error!("Invalid type of .note.gnu.property"))?
+                .context("Invalid type of .note.gnu.property")?
             {
                 let gnu_property = gnu_property?;
 
@@ -4798,18 +4798,10 @@ pub(crate) fn process_riscv_attributes(
                     .split('_')
                     .map(|part| {
                         let mut it = part.chars().rev();
-                        let minor = it
-                            .next()
-                            .ok_or_else(|| crate::error!("Cannot parse minor"))?
-                            .to_string();
-                        let p = it
-                            .next()
-                            .ok_or_else(|| crate::error!("Cannot parse 'p' separator"))?;
+                        let minor = it.next().context("Cannot parse minor")?.to_string();
+                        let p = it.next().context("Cannot parse 'p' separator")?;
                         ensure!(p == 'p', "Separator expected");
-                        let major = it
-                            .next()
-                            .ok_or_else(|| crate::error!("Cannot parse major"))?
-                            .to_string();
+                        let major = it.next().context("Cannot parse major")?.to_string();
                         let name = it.rev().collect();
                         Ok((name, (major.parse()?, minor.parse()?)))
                     })

@@ -208,7 +208,8 @@ fn take_mut<'out, T: object::Pod>(bytes: &mut &'out mut [u8]) -> Result<&'out mu
         .split_off_mut(..size_of::<T>())
         .context("Insufficient allocation")?;
     from_bytes_mut::<T>(bytes)
-        .map_err(|()| error!("Unaligned write"))
+        .ok()
+        .context("Unaligned write")
         .map(|(a, _)| a)
 }
 
@@ -474,8 +475,7 @@ fn write_plt_entries<A: Arch<Platform = MachO>>(
         let offset = stub_address
             .get()
             .checked_sub(plt_layout.mem_offset)
-            .ok_or_else(|| error!("STUB entry address is before __stubs"))?
-            as usize;
+            .context("STUB entry address is before __stubs")? as usize;
         let end = offset + PLT_ENTRY_SIZE as usize;
 
         let got_address = imported_symbol
@@ -630,7 +630,8 @@ fn split_segment_command_buffer(
 ) -> Result<(&mut SegmentCommand, &mut [SectionEntry])> {
     let command = take_mut(&mut bytes)?;
     let (sections, rest) = slice_from_bytes_mut(bytes, section_count)
-        .map_err(|_| error!("Invalid segment section allocation"))?;
+        .ok()
+        .context("Invalid segment section allocation")?;
     ensure!(
         rest.is_empty(),
         "Trailing bytes in segment command allocation"
@@ -1214,10 +1215,12 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
     let starts_offset = size_of::<ChainedFixupsHeader>();
 
     let (header, rest) = from_bytes_mut::<ChainedFixupsHeader>(chained_fixup_table)
-        .map_err(|_| error!("Invalid chained fixups header allocation"))?;
+        .ok()
+        .context("Invalid chained fixups header allocation")?;
     let (starts_in_image, mut rest) =
         slice_from_bytes_mut::<U32<Endianness>>(rest, segment_count + 1)
-            .map_err(|_| error!("Invalid chained fixups starts allocation"))?;
+            .ok()
+            .context("Invalid chained fixups starts allocation")?;
 
     // 1) fill up ChainedFixupsHeader. `imports_offset` and `symbols_offset` are written later once
     //    we know how many DyldChainedStartsInSegment entries have been emitted
@@ -1284,7 +1287,8 @@ fn write_chained_fixup_table(layout: &MachOLayout, chained_fixup_table: &mut [u8
     header.symbols_offset.set(LE, symbols_offset as u32);
 
     let (imports, string_pool) = slice_from_bytes_mut::<U32<Endianness>>(rest, symbols.len())
-        .map_err(|_| error!("Invalid chained fixups imports allocation"))?;
+        .ok()
+        .context("Invalid chained fixups imports allocation")?;
 
     // 4) fill up all imported symbols chunked by the pages
     // TODO: support more pages
@@ -1349,7 +1353,8 @@ fn write_uuid(layout: &MachOLayout, sized_output: &mut SizedOutput<impl OutputFi
 
     while !load_commands.is_empty() {
         let header = object::from_bytes::<LoadCommand<Endianness>>(load_commands)
-            .map_err(|_| error!("Invalid load command header"))?
+            .ok()
+            .context("Invalid load command header")?
             .0;
         let cmd_type = header.cmd.get(LE);
         let cmd_size = header.cmdsize.get(LE) as usize;
@@ -1451,7 +1456,7 @@ fn write_code_signature_hashes(
         (CS_HEADERS_SIZE + code_signature_padded_identifier_size(layout.args())) as usize;
     let hashes = code_signature
         .get_mut(hashes_offset..)
-        .ok_or_else(|| error!("Invalid CODE_SIGNATURE allocation"))?;
+        .context("Invalid CODE_SIGNATURE allocation")?;
 
     hashes.copy_from_slice(&calculated_hashes);
 
@@ -1514,7 +1519,8 @@ impl MachOSymbolTableWriter {
             .split_off_mut(..size_of::<SymtabEntry>())
             .unwrap();
         let entry: &mut SymtabEntry = from_bytes_mut(entry_bytes)
-            .map_err(|_| error!("Invalid SYMTAB_GLOBAL entry allocation"))?
+            .ok()
+            .context("Invalid SYMTAB_GLOBAL entry allocation")?
             .0;
         entry.n_strx.set(LE, string_offset);
         Ok(entry)

@@ -1,6 +1,7 @@
+use crate::bail;
 use crate::elf::Elf64;
 use crate::elf::PLT_ENTRY_SIZE;
-use crate::error;
+use crate::error::Context as _;
 use crate::error::Result;
 use crate::platform::Platform;
 use crate::platform::PreviousRelocationInfo;
@@ -42,8 +43,8 @@ impl crate::platform::Arch for ElfLoongArch64 {
 
     #[inline(always)]
     fn relocation_from_raw(r_type: object::elf::RelocationType) -> Result<RelocationKindInfo> {
-        linker_utils::loongarch64::relocation_type_from_raw(r_type).ok_or_else(|| {
-            error!(
+        linker_utils::loongarch64::relocation_type_from_raw(r_type).with_context(|| {
+            format!(
                 "Unsupported relocation type {}",
                 Self::rel_type_to_string(r_type)
             )
@@ -102,7 +103,7 @@ impl crate::platform::Arch for ElfLoongArch64 {
             Ok(flags) => Ok(flags),
             // no items, return blank flags
             Err(AllEqualValueError(None)) => Ok(object::elf::FileFlags(0)),
-            Err(AllEqualValueError(Some([a, b]))) => Err(error!("non-unique e_flags: {a}, {b}")),
+            Err(AllEqualValueError(Some([a, b]))) => bail!("non-unique e_flags: {a}, {b}"),
         }
     }
 

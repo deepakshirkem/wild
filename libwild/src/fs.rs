@@ -3,6 +3,7 @@
 //! The main output is exposed as a sized random-access byte buffer because linker writers fill
 //! disjoint regions in parallel. Auxiliary outputs are written as complete byte slices.
 
+use crate::bail;
 use crate::error::Context as _;
 use crate::error::Result;
 use crate::host::fs::FilesystemKind;
@@ -85,6 +86,7 @@ pub trait OutputFileData: Send {
 /// # Examples
 ///
 /// ```
+/// use libwild::error::Context as _;
 /// use libwild::{FileSystem, FileType, InputFileData, Linker, OutputFileData, OutputOptions};
 /// use object::write::{Object, StandardSection, Symbol, SymbolSection};
 /// use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
@@ -149,7 +151,7 @@ pub trait OutputFileData: Send {
 ///             .unwrap()
 ///             .get(&path.to_path_buf())
 ///             .cloned()
-///             .ok_or_else(|| libwild::error!("No such in-memory file: {}", path.display()))?;
+///             .with_context(|| format!("No such in-memory file: {}", path.display()))?;
 ///         Ok((Input(bytes), None))
 ///     }
 ///
@@ -206,7 +208,7 @@ pub trait OutputFileData: Send {
 ///         options: OutputOptions,
 ///     ) -> libwild::error::Result<Self::Output> {
 ///         let size = usize::try_from(options.size)
-///             .map_err(|_| libwild::error!("output is too large for this platform"))?;
+///             .context("output is too large for this platform")?;
 ///         Ok(Output {
 ///             path: path.to_path_buf(),
 ///             bytes: vec![0; size],
@@ -270,7 +272,7 @@ pub trait OutputFileData: Send {
 ///         .unwrap()
 ///         .get(Path::new("libx.so"))
 ///         .cloned()
-///         .ok_or_else(|| libwild::error!("linker did not create libx.so"))?;
+///         .context("linker did not create libx.so")?;
 ///     // std::fs::write("libx.so", &output)?;
 ///     Ok(())
 /// }
@@ -498,9 +500,7 @@ impl FileSystem for OsFileSystem {
         let file_write_mode = options.write_mode.unwrap_or(defaults.write_mode);
 
         if huge_pages_required && matches!(file_write_mode, FileWriteMode::BufferThenWrite) {
-            return Err(crate::error!(
-                "--madvise-huge-pages requires mmapped output file"
-            ));
+            bail!("--madvise-huge-pages requires mmapped output file");
         }
 
         let set_len_result = file.set_len(options.size);

@@ -394,7 +394,7 @@ impl WasmRelocSection {
     pub(crate) fn decode_entries(&self, data: &[u8]) -> Result<Vec<WasmRelocation>> {
         let payload = data
             .get(self.payload_range.start as usize..self.payload_range.end as usize)
-            .ok_or_else(|| crate::error!("Wasm reloc section payload range out of bounds"))?;
+            .context("Wasm reloc section payload range out of bounds")?;
         let reader = wasmparser::RelocSectionReader::new(BinaryReader::new(
             payload,
             u64::from(self.payload_range.start),
@@ -537,10 +537,10 @@ pub(crate) fn apply_relocation(
     let size = reloc.slot_size();
     let end = offset
         .checked_add(size)
-        .ok_or_else(|| crate::error!("Wasm relocation offset overflow"))?;
+        .context("Wasm relocation offset overflow")?;
     let slot = bytes
         .get_mut(offset..end)
-        .ok_or_else(|| crate::error!("Wasm relocation slot out of range"))?;
+        .context("Wasm relocation slot out of range")?;
     match reloc.ty {
         RelocationType::FunctionIndexLeb
         | RelocationType::MemoryAddrLeb
@@ -806,7 +806,7 @@ impl<'data> File<'data> {
             });
             section_offset = section_offset
                 .checked_add(encoded_size)
-                .ok_or_else(|| crate::error!("Wasm data section offset overflow"))?;
+                .context("Wasm data section offset overflow")?;
         }
         Ok(segments)
     }
@@ -845,7 +845,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     ) -> crate::error::Result<&<Self::Platform as platform::Platform>::SymtabEntry> {
         self.symbols
             .get(index.0)
-            .ok_or_else(|| crate::error!("wasm symbol index {} out of range", index.0))
+            .with_context(|| format!("wasm symbol index {} out of range", index.0))
     }
 
     fn section_size(
@@ -864,7 +864,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         }
         self.data
             .get(symbol.name_range())
-            .ok_or_else(|| crate::error!("wasm symbol name range out of bounds"))
+            .context("wasm symbol name range out of bounds")
     }
 
     fn symbol_offset_in_section(
@@ -906,7 +906,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     ) -> crate::error::Result<&<Self::Platform as platform::Platform>::SectionHeader> {
         self.sections
             .get(index.0)
-            .ok_or_else(|| crate::error!("wasm section index {} out of range", index.0))
+            .with_context(|| format!("wasm section index {} out of range", index.0))
     }
 
     fn section_by_name(
@@ -967,12 +967,12 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         let header = self
             .sections
             .get(index.0)
-            .ok_or_else(|| crate::error!("wasm section index {} out of range", index.0))?;
+            .with_context(|| format!("wasm section index {} out of range", index.0))?;
         if let Some(name_range) = &header.name_range {
             Ok(&self.data[name_range.start as usize..name_range.end as usize])
         } else {
             standard_section_name(header.id)
-                .ok_or_else(|| crate::error!("unknown wasm section id {}", header.id))
+                .with_context(|| format!("unknown wasm section id {}", header.id))
         }
     }
 
@@ -2118,7 +2118,7 @@ impl<'data> WasmLayout<'data> {
 
 fn const_expr_encoded_size(expr: &ConstExpr<'_>) -> Result<u32> {
     let body = crate::wasm_writer::const_expr_body(expr)
-        .ok_or_else(|| crate::error!("Wasm const expression is missing end opcode"))?;
+        .context("Wasm const expression is missing end opcode")?;
     // instruction bytes plus the trailing `end` (0x0B) opcode
     u32::try_from(body.len() + 1).context("Wasm const expression too large")
 }
@@ -2143,7 +2143,7 @@ fn wasm_data_segment_encoded_size(kind: &DataKind<'_>, data_len: usize) -> Resul
             Ok(header
                 .checked_add(init_len)
                 .and_then(|n| n.checked_add(payload_len))
-                .ok_or_else(|| crate::error!("Wasm data segment size overflow"))?)
+                .context("Wasm data segment size overflow")?)
         }
     }
 }
@@ -2173,7 +2173,7 @@ fn output_data_segment_encoded_size(
             Ok(header
                 .checked_add(init_len)
                 .and_then(|n| n.checked_add(payload_len))
-                .ok_or_else(|| crate::error!("Wasm data segment size overflow"))?)
+                .context("Wasm data segment size overflow")?)
         }
     }
 }
@@ -2220,16 +2220,16 @@ fn classify_data_reloc_ranges(
 /// Align `data_end` to [`STACK_ALIGNMENT`], then add the stack size.
 fn stack_high_after_data(data_end: u32, stack_size: u32) -> Result<u32> {
     let stack_base = u32::try_from(crate::alignment::STACK_ALIGNMENT.align_up(u64::from(data_end)))
-        .map_err(|_| crate::error!("Wasm stack base overflow"))?;
+        .context("Wasm stack base overflow")?;
     stack_base
         .checked_add(stack_size)
-        .ok_or_else(|| crate::error!("Wasm stack pointer overflow"))
+        .context("Wasm stack pointer overflow")
 }
 
 /// Align the end of static data for `__heap_base`.
 fn heap_base_after_data(data_end: u32) -> Result<u32> {
     u32::try_from(crate::alignment::STACK_ALIGNMENT.align_up(u64::from(data_end)))
-        .map_err(|_| crate::error!("Wasm heap base overflow"))
+        .context("Wasm heap base overflow")
 }
 
 /// Initial `__stack_pointer` value for the chosen stack layout.
@@ -2312,14 +2312,13 @@ fn tls_reloc_value(abs_addr: Option<u32>, tls_base: u32, addend: i64) -> Result<
     let Some(abs_addr) = abs_addr else {
         return Ok(0);
     };
-    let offset = abs_addr.checked_sub(tls_base).ok_or_else(|| {
-        crate::error!("TLS relocation address 0x{abs_addr:x} is before TLS base 0x{tls_base:x}")
+    let offset = abs_addr.checked_sub(tls_base).with_context(|| {
+        format!("TLS relocation address 0x{abs_addr:x} is before TLS base 0x{tls_base:x}")
     })?;
     let value = i64::from(offset)
         .checked_add(addend)
-        .ok_or_else(|| crate::error!("Wasm TLS relocation value overflow"))?;
-    let value = i32::try_from(value)
-        .map_err(|_| crate::error!("Wasm TLS relocation value out of range"))?;
+        .context("Wasm TLS relocation value overflow")?;
+    let value = i32::try_from(value).context("Wasm TLS relocation value out of range")?;
     Ok(value as u32)
 }
 
@@ -2345,7 +2344,7 @@ fn layout_object_data<'data>(
         // Linking `SegmentInfo.alignment` is a power-of-two exponent.
         let align = data_segment_alignment(input, original_index);
         *memory_cursor = u32::try_from(align.align_up(u64::from(*memory_cursor)))
-            .map_err(|_| crate::error!("Wasm data segment alignment overflow"))?;
+            .context("Wasm data segment alignment overflow")?;
         let output_memory_offset = *memory_cursor;
         let encoded_output_size = output_data_segment_encoded_size(
             &segment.kind,
@@ -2355,7 +2354,7 @@ fn layout_object_data<'data>(
         )?;
         *memory_cursor = memory_cursor
             .checked_add(u32::try_from(segment.data.len()).context("Wasm data segment too large")?)
-            .ok_or_else(|| crate::error!("Wasm output memory offset overflow"))?;
+            .context("Wasm output memory offset overflow")?;
         let (reloc_range, payload_start) = segment_reloc_ranges
             .get(filtered_idx)
             .cloned()
@@ -2445,7 +2444,7 @@ impl WasmObjectIndexMap {
 
         let sym = symbols
             .get(reloc.index as usize)
-            .ok_or_else(|| crate::error!("relocation symbol index {} out of range", reloc.index))?;
+            .with_context(|| format!("relocation symbol index {} out of range", reloc.index))?;
 
         match reloc.ty {
             RelocationType::FunctionIndexLeb | RelocationType::FunctionIndexI32 => {
@@ -2464,8 +2463,8 @@ impl WasmObjectIndexMap {
                     .get(reloc.index as usize)
                     .copied()
                     .flatten()
-                    .ok_or_else(|| {
-                        crate::error!(
+                    .with_context(|| {
+                        format!(
                             "missing GOT.mem global for data symbol index {}",
                             reloc.index
                         )
@@ -2475,8 +2474,8 @@ impl WasmObjectIndexMap {
                     .get(reloc.index as usize)
                     .copied()
                     .flatten()
-                    .ok_or_else(|| {
-                        crate::error!(
+                    .with_context(|| {
+                        format!(
                             "missing GOT.func global for function symbol index {}",
                             reloc.index
                         )
@@ -2505,14 +2504,14 @@ impl WasmObjectIndexMap {
                     .data_addresses
                     .get(reloc.index as usize)
                     .copied()
-                    .ok_or_else(|| {
-                        crate::error!("data address for symbol index {} out of range", reloc.index)
+                    .with_context(|| {
+                        format!("data address for symbol index {} out of range", reloc.index)
                     })?;
                 if reloc.ty == RelocationType::MemoryAddrRelSleb {
                     let relative =
                         i64::from(addr.unwrap_or(0)) - i64::from(memory_base) + reloc.addend;
-                    let relative = i32::try_from(relative)
-                        .map_err(|_| crate::error!("Wasm REL_SLEB relocation out of range"))?;
+                    let relative =
+                        i32::try_from(relative).context("Wasm REL_SLEB relocation out of range")?;
                     Ok(relative as u32)
                 } else if reloc.ty == RelocationType::MemoryAddrTlsSleb {
                     tls_reloc_value(addr, tls_base, reloc.addend)
@@ -2540,9 +2539,9 @@ impl WasmObjectIndexMap {
                     if slot == 0 {
                         return Ok(0);
                     }
-                    let relative = slot.checked_sub(DEFAULT_TABLE_BASE).ok_or_else(|| {
-                        crate::error!("Wasm TABLE_INDEX_REL_SLEB relocation out of range")
-                    })?;
+                    let relative = slot
+                        .checked_sub(DEFAULT_TABLE_BASE)
+                        .context("Wasm TABLE_INDEX_REL_SLEB relocation out of range")?;
                     Ok(relative)
                 } else {
                     Ok(slot)
@@ -2891,7 +2890,7 @@ fn function_body_span(body: &WasmFunctionBody<'_>) -> Result<(u32, u32)> {
     let len = u32::try_from(body.bytes.len()).context("Wasm function body too large")?;
     let end = start
         .checked_add(len)
-        .ok_or_else(|| crate::error!("Wasm function body span overflow"))?;
+        .context("Wasm function body span overflow")?;
     Ok((start, end))
 }
 
@@ -2903,7 +2902,7 @@ fn data_segment_span(segment: &WasmDataSegment<'_>) -> Result<(u32, u32)> {
     let start = segment.section_offset;
     let end = start
         .checked_add(segment.encoded_size)
-        .ok_or_else(|| crate::error!("Wasm data segment span overflow"))?;
+        .context("Wasm data segment span overflow")?;
     Ok((start, end))
 }
 
@@ -3104,9 +3103,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
             .into_iter()
             .map(|global| {
                 let init_expr_body = crate::wasm_writer::const_expr_body(&global.init_expr)
-                    .ok_or_else(|| {
-                        crate::error!("Wasm global initializer is missing end opcode")
-                    })?;
+                    .context("Wasm global initializer is missing end opcode")?;
                 Ok(OutputGlobal {
                     ty: global.ty,
                     init_expr_body: Cow::Borrowed(init_expr_body),
@@ -3264,7 +3261,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
             let output_type_index = index_bases
                 .type_index_base
                 .checked_add(u32::try_from(local_ty).context("too many Wasm types")?)
-                .ok_or_else(|| crate::error!("Wasm type index overflow"))?;
+                .context("Wasm type index overflow")?;
             type_indices.push(output_type_index);
         }
 
@@ -3293,8 +3290,8 @@ impl<'data> WasmObjectLayoutInput<'data> {
                 ImportResolution::Unresolved => {
                     let output_function_index = shared_imports
                         .function_index(object_index, i)
-                        .ok_or_else(|| {
-                            crate::error!(
+                        .with_context(|| {
+                            format!(
                                 "missing shared function import index for object {object_index} \
                                  import {i}"
                             )
@@ -3302,9 +3299,9 @@ impl<'data> WasmObjectLayoutInput<'data> {
                     index_map.function_indices.push(output_function_index);
                 }
                 ImportResolution::LinkerDefined(known) => {
-                    let index = indices.function_index(known).ok_or_else(|| {
-                        crate::error!("missing reserved Wasm function for {known:?}")
-                    })?;
+                    let index = indices
+                        .function_index(known)
+                        .with_context(|| format!("missing reserved Wasm function for {known:?}"))?;
                     index_map.function_indices.push(index);
                 }
                 ImportResolution::WeakUndefStub { stub_index } => {
@@ -3312,8 +3309,8 @@ impl<'data> WasmObjectLayoutInput<'data> {
                         .weak_undef_stubs
                         .get(stub_index as usize)
                         .map(|s| s.function_index)
-                        .ok_or_else(|| {
-                            crate::error!("Wasm weak-undef stub index {stub_index} out of range")
+                        .with_context(|| {
+                            format!("Wasm weak-undef stub index {stub_index} out of range")
                         })?;
                     index_map.function_indices.push(index);
                 }
@@ -3334,7 +3331,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
                     let output_function_index = target_bases
                         .defined_function_base
                         .checked_add(local_defined_index)
-                        .ok_or_else(|| crate::error!("Wasm function index overflow"))?;
+                        .context("Wasm function index overflow")?;
                     index_map.function_indices.push(output_function_index);
                 }
                 ImportResolution::ResolvedGlobal { .. }
@@ -3355,8 +3352,8 @@ impl<'data> WasmObjectLayoutInput<'data> {
                 ImportResolution::Unresolved => {
                     let output_global_index = shared_imports
                         .global_index(object_index, i)
-                        .ok_or_else(|| {
-                            crate::error!(
+                        .with_context(|| {
+                            format!(
                                 "missing shared global import index for object {object_index} \
                                  import {i}"
                             )
@@ -3364,9 +3361,9 @@ impl<'data> WasmObjectLayoutInput<'data> {
                     index_map.global_indices.push(output_global_index);
                 }
                 ImportResolution::LinkerDefined(known) => {
-                    let index = indices.global_index(known).ok_or_else(|| {
-                        crate::error!("missing reserved Wasm global for {known:?}")
-                    })?;
+                    let index = indices
+                        .global_index(known)
+                        .with_context(|| format!("missing reserved Wasm global for {known:?}"))?;
                     index_map.global_indices.push(index);
                 }
                 ImportResolution::DirectGlobal { output_index } => {
@@ -3395,7 +3392,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
                     let output_global_index = target_bases
                         .defined_global_base
                         .checked_add(local_defined_index)
-                        .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+                        .context("Wasm global index overflow")?;
                     index_map.global_indices.push(output_global_index);
                 }
                 ImportResolution::ResolvedFunction { .. }
@@ -3413,7 +3410,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
                 let output_function_index = index_bases
                     .defined_function_base
                     .checked_add(dense_or_dead)
-                    .ok_or_else(|| crate::error!("Wasm function index overflow"))?;
+                    .context("Wasm function index overflow")?;
                 index_map.function_indices.push(output_function_index);
             }
         }
@@ -3425,7 +3422,7 @@ impl<'data> WasmObjectLayoutInput<'data> {
                 let output_global_index = index_bases
                     .defined_global_base
                     .checked_add(dense_or_dead)
-                    .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+                    .context("Wasm global index overflow")?;
                 index_map.global_indices.push(output_global_index);
             }
         }
@@ -3552,10 +3549,10 @@ impl<'data> SharedUnresolvedImports<'data> {
         for imp in &self.functions {
             let type_index = index_bases
                 .get(imp.first_object)
-                .ok_or_else(|| crate::error!("Wasm shared import object index out of range"))?
+                .context("Wasm shared import object index out of range")?
                 .type_index_base
                 .checked_add(imp.local_type_index)
-                .ok_or_else(|| crate::error!("Wasm type index overflow"))?;
+                .context("Wasm type index overflow")?;
             imports.push(OutputImport {
                 module: imp.module,
                 name: imp.name,
@@ -4185,9 +4182,9 @@ fn setup_got_mem_and_indices<'data>(
             )?;
 
             if !scan.got_mem.is_empty() {
-                let first_got = indices.got_mem_global_base.ok_or_else(|| {
-                    crate::error!("GOT.mem entries present but no global base reserved")
-                })?;
+                let first_got = indices
+                    .got_mem_global_base
+                    .context("GOT.mem entries present but no global base reserved")?;
                 scan.got_mem.per_object_global_indices =
                     assign_got_slot_global_indices(&scan.per_object_got_mem_slots, first_got)?;
                 finalize_got_import_resolutions(resolutions, first_got, |resolution| {
@@ -4199,9 +4196,9 @@ fn setup_got_mem_and_indices<'data>(
             }
 
             if !scan.got_func.is_empty() {
-                let first_got = indices.got_func_global_base.ok_or_else(|| {
-                    crate::error!("GOT.func entries present but no global base reserved")
-                })?;
+                let first_got = indices
+                    .got_func_global_base
+                    .context("GOT.func entries present but no global base reserved")?;
                 scan.got_func.per_object_global_indices =
                     assign_got_slot_global_indices(&scan.per_object_got_func_slots, first_got)?;
                 finalize_got_import_resolutions(resolutions, first_got, |resolution| {
@@ -4299,11 +4296,10 @@ fn absorb_weak_undef_function_imports<'data>(
             let ty = input
                 .types
                 .get(import.type_index as usize)
-                .ok_or_else(|| {
-                    crate::error!(
+                .with_context(|| {
+                    format!(
                         "Wasm type index {} out of range for weak import `{}`",
-                        import.type_index,
-                        import.name
+                        import.type_index, import.name
                     )
                 })?
                 .clone();
@@ -4664,7 +4660,7 @@ fn assign_got_slot_global_indices(
                 Some(s) => Some(
                     first_global_index
                         .checked_add(*s as u32)
-                        .ok_or_else(|| crate::error!("Wasm global index overflow"))?,
+                        .context("Wasm global index overflow")?,
                 ),
                 None => None,
             });
@@ -4824,7 +4820,7 @@ fn finalize_got_import_resolutions(
             };
             let output_index = first_got
                 .checked_add(slot as u32)
-                .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+                .context("Wasm global index overflow")?;
             *resolution = ImportResolution::DirectGlobal { output_index };
         }
     }
@@ -4855,12 +4851,12 @@ fn fill_got_mem_inits(
                 .data_addresses
                 .get(symbol_offset)
                 .copied()
-                .ok_or_else(|| crate::error!("GOT.mem missing data address for definition"))?
+                .context("GOT.mem missing data address for definition")?
                 .unwrap_or(0),
             GotMemDef::LinkerDefined(known) => known
                 .data_address(data_start, data_end, stack_size, heap_end, stack_first)?
-                .ok_or_else(|| {
-                    crate::error!(
+                .with_context(|| {
+                    format!(
                         "GOT.mem linker-defined symbol `{}` has no data address",
                         std::str::from_utf8(known.name()).unwrap_or("?")
                     )
@@ -4870,7 +4866,7 @@ fn fill_got_mem_inits(
         let global = layout
             .globals
             .get_mut(global_slot)
-            .ok_or_else(|| crate::error!("GOT.mem global slot {global_slot} out of range"))?;
+            .with_context(|| format!("GOT.mem global slot {global_slot} out of range"))?;
         global.init_expr_body = Cow::Owned(encode_i32_const_u32(addr));
     }
     Ok(())
@@ -4888,16 +4884,17 @@ fn fill_exported_data_global_inits(
     for &(known, global_index) in &indices.data_address_globals {
         let addr = known
             .data_address(data_start, data_end, stack_size, heap_end, stack_first)?
-            .ok_or_else(|| {
-                crate::error!(
+            .with_context(|| {
+                format!(
                     "linker-defined symbol `{}` has no address to export",
                     std::str::from_utf8(known.name()).unwrap_or("?")
                 )
             })?;
         let defined_slot = (global_index - indices.global_import_count) as usize;
-        let global = layout.globals.get_mut(defined_slot).ok_or_else(|| {
-            crate::error!("exported data global slot {defined_slot} out of range")
-        })?;
+        let global = layout
+            .globals
+            .get_mut(defined_slot)
+            .with_context(|| format!("exported data global slot {defined_slot} out of range"))?;
         global.init_expr_body = Cow::Owned(encode_i32_const_u32(addr));
     }
     Ok(())
@@ -4917,11 +4914,11 @@ fn fill_got_func_inits(
     let defined_slot = (got_base - indices.global_import_count) as usize;
 
     for (i, entry) in got_func.entries.iter().enumerate() {
-        let input = layout_inputs.get(entry.object_index).ok_or_else(|| {
-            crate::error!("GOT.func object index {} out of range", entry.object_index)
+        let input = layout_inputs.get(entry.object_index).with_context(|| {
+            format!("GOT.func object index {} out of range", entry.object_index)
         })?;
-        let sym = input.symbols.get(entry.symbol_offset).ok_or_else(|| {
-            crate::error!(
+        let sym = input.symbols.get(entry.symbol_offset).with_context(|| {
+            format!(
                 "GOT.func symbol offset {} out of range",
                 entry.symbol_offset
             )
@@ -4946,9 +4943,8 @@ fn fill_got_func_inits(
         let global = layout
             .globals
             .get_mut(global_slot)
-            .ok_or_else(|| crate::error!("GOT.func global slot {global_slot} out of range"))?;
-        let table_i32 = i32::try_from(slot)
-            .map_err(|_| crate::error!("GOT.func table index out of i32 range"))?;
+            .with_context(|| format!("GOT.func global slot {global_slot} out of range"))?;
+        let table_i32 = i32::try_from(slot).context("GOT.func table index out of i32 range")?;
         global.init_expr_body = Cow::Owned(encode_i32_const_body(table_i32));
     }
     Ok(())
@@ -5069,13 +5065,13 @@ impl LinkerDefinedIndices {
             data_address_globals.push((known, next_global));
             next_global = next_global
                 .checked_add(1)
-                .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+                .context("Wasm global index overflow")?;
         }
         let got_mem_global_base = if request.got_mem_count > 0 {
             let base = next_global;
             next_global = next_global
                 .checked_add(request.got_mem_count)
-                .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+                .context("Wasm global index overflow")?;
             Some(base)
         } else {
             None
@@ -5084,7 +5080,7 @@ impl LinkerDefinedIndices {
             let base = next_global;
             next_global = next_global
                 .checked_add(request.got_func_count)
-                .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+                .context("Wasm global index overflow")?;
             Some(base)
         } else {
             None
@@ -5101,7 +5097,7 @@ impl LinkerDefinedIndices {
             stub.function_index = next_func;
             next_func = next_func
                 .checked_add(1)
-                .ok_or_else(|| crate::error!("Wasm function index overflow"))?;
+                .context("Wasm function index overflow")?;
         }
         let num_defined_functions = next_func - function_import_count;
 
@@ -5333,17 +5329,16 @@ fn wrap_command_exports(layout: &mut WasmLayout<'_>, call_ctors: u32) -> Result<
         let type_index = *layout
             .function_type_indices
             .get(defined_idx)
-            .ok_or_else(|| {
-                crate::error!(
+            .with_context(|| {
+                format!(
                     "export `{}` function index {} has no type",
-                    export.name,
-                    export.index
+                    export.name, export.index
                 )
             })?;
         let n_params = layout
             .output_types
             .get(type_index as usize)
-            .ok_or_else(|| crate::error!("missing Wasm type {type_index}"))?
+            .with_context(|| format!("missing Wasm type {type_index}"))?
             .params()
             .len();
         pending.push(PendingWrap {
@@ -5369,7 +5364,7 @@ fn wrap_command_exports(layout: &mut WasmLayout<'_>, call_ctors: u32) -> Result<
                 u32::try_from(layout.function_type_indices.len())
                     .context("too many Wasm functions")?,
             )
-            .ok_or_else(|| crate::error!("Wasm function index overflow"))?;
+            .context("Wasm function index overflow")?;
         layout.function_type_indices.push(wrap.type_index);
         layout.function_bodies.push(owned_linker_function_body(
             encode_command_export_wrapper_body(call_ctors, wrap.original, wrap.n_params),
@@ -5403,18 +5398,21 @@ fn function_type_for_symbol<'a>(
             "Wasm init/reference to GC'd function index {}",
             sym.index
         );
-        *input.module_functions.get(dense as usize).ok_or_else(|| {
-            crate::error!(
-                "Wasm function index {} out of range (dense {dense}, live len {})",
-                sym.index,
-                input.module_functions.len()
-            )
-        })?
+        *input
+            .module_functions
+            .get(dense as usize)
+            .with_context(|| {
+                format!(
+                    "Wasm function index {} out of range (dense {dense}, live len {})",
+                    sym.index,
+                    input.module_functions.len()
+                )
+            })?
     };
     input
         .types
         .get(type_index as usize)
-        .ok_or_else(|| crate::error!("Wasm type index {type_index} out of range"))
+        .with_context(|| format!("Wasm type index {type_index} out of range"))
 }
 
 /// From InitFuncs to `(output function index, result count)`, sorted by ascending priority.
@@ -5638,7 +5636,7 @@ fn ensure_memory_covers(
 /// `__heap_end` = end of initial linear memory (`memory.initial * page_size`).
 fn heap_end_from_initial_pages(initial_pages: u64) -> Result<u32> {
     u32::try_from(initial_pages.saturating_mul(wasm_page_size()))
-        .map_err(|_| crate::error!("Wasm initial memory size overflow"))
+        .context("Wasm initial memory size overflow")
 }
 
 /// Write stack-pointer init after static data layout.
@@ -5655,7 +5653,7 @@ fn fill_stack_pointer_init(
     let global = layout
         .globals
         .get_mut(defined_slot as usize)
-        .ok_or_else(|| crate::error!("Wasm stack pointer global missing"))?;
+        .context("Wasm stack pointer global missing")?;
     ensure!(
         global.ty.mutable && global.ty.content_type == wasmparser::ValType::I32,
         "Wasm stack pointer global has unexpected type"
@@ -5672,7 +5670,7 @@ fn fill_tls_base_init(layout: &mut WasmLayout<'_>, indices: &LinkerDefinedIndice
     let global = layout
         .globals
         .get_mut(defined_slot as usize)
-        .ok_or_else(|| crate::error!("Wasm TLS base global missing"))?;
+        .context("Wasm TLS base global missing")?;
     ensure!(
         !global.ty.mutable && global.ty.content_type == wasmparser::ValType::I32,
         "Wasm TLS base global has unexpected type"
@@ -6140,7 +6138,7 @@ where
             if layout_inputs.iter().any(input_has_tls_segments) {
                 let tls_align = max_tls_alignment(&layout_inputs);
                 memory_cursor = u32::try_from(tls_align.align_up(u64::from(memory_cursor)))
-                    .map_err(|_| crate::error!("Wasm TLS alignment overflow"))?;
+                    .context("Wasm TLS alignment overflow")?;
                 layout.tls_base = memory_cursor;
                 for (obj_idx, input) in layout_inputs.iter().enumerate() {
                     let tls_segments = layout_object_data(
@@ -6310,9 +6308,10 @@ fn finalize_indirect_function_table(
     {
         let index_map = &layout.object_index_maps[obj_idx];
         for &sym_idx in sym_indices {
-            let sym = input.symbols.get(sym_idx).ok_or_else(|| {
-                crate::error!("table index relocation symbol {sym_idx} out of range")
-            })?;
+            let sym = input
+                .symbols
+                .get(sym_idx)
+                .with_context(|| format!("table index relocation symbol {sym_idx} out of range"))?;
             ensure!(
                 sym.kind == WasmSymbolKind::Func,
                 "R_WASM_TABLE_INDEX_* references non-function symbol"
@@ -6414,8 +6413,8 @@ fn data_relocations_are_supported(relocs: &[WasmRelocation]) -> bool {
 pub(crate) fn reloc_value_with_addend(base: u32, addend: i64) -> Result<u32> {
     let value = i64::from(base)
         .checked_add(addend)
-        .ok_or_else(|| crate::error!("Wasm relocation value overflow"))?;
-    u32::try_from(value).map_err(|_| crate::error!("Wasm relocation value out of range"))
+        .context("Wasm relocation value overflow")?;
+    u32::try_from(value).context("Wasm relocation value out of range")
 }
 
 /// Apply addend policy. Relative table/memory bases already include the addend.
@@ -6460,9 +6459,11 @@ fn try_data_symbol_memory_address(
     let Some(Some(segment_base)) = segment_memory_offsets.get(sym.index as usize) else {
         return Ok(None);
     };
-    Ok(Some(segment_base.checked_add(sym.offset).ok_or_else(
-        || crate::error!("Wasm data symbol address overflow"),
-    )?))
+    Ok(Some(
+        segment_base
+            .checked_add(sym.offset)
+            .context("Wasm data symbol address overflow")?,
+    ))
 }
 
 /// Wasm symbols synthesized by the linker.
@@ -6654,15 +6655,15 @@ fn allocate_wasm_object_index_bases(
         });
         next_type_index = next_type_index
             .checked_add(u32::try_from(input.types.len()).context("too many Wasm types")?)
-            .ok_or_else(|| crate::error!("Wasm type index overflow"))?;
+            .context("Wasm type index overflow")?;
     }
 
     let mut next_defined_function_index = function_import_count
         .checked_add(indices.num_defined_functions)
-        .ok_or_else(|| crate::error!("Wasm function index overflow"))?;
+        .context("Wasm function index overflow")?;
     let mut next_defined_global_index = global_import_count
         .checked_add(indices.num_defined_globals)
-        .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+        .context("Wasm global index overflow")?;
     for (input, index_base) in layout_inputs.iter().zip(index_bases.iter_mut()) {
         index_base.defined_function_base = next_defined_function_index;
         index_base.defined_global_base = next_defined_global_index;
@@ -6670,10 +6671,10 @@ fn allocate_wasm_object_index_bases(
             .checked_add(
                 u32::try_from(input.module_functions.len()).context("too many Wasm functions")?,
             )
-            .ok_or_else(|| crate::error!("Wasm function index overflow"))?;
+            .context("Wasm function index overflow")?;
         next_defined_global_index = next_defined_global_index
             .checked_add(u32::try_from(input.globals.len()).context("too many Wasm globals")?)
-            .ok_or_else(|| crate::error!("Wasm global index overflow"))?;
+            .context("Wasm global index overflow")?;
     }
 
     Ok(index_bases)
@@ -6702,8 +6703,8 @@ fn classify_code_relocations(bodies: &mut [WasmFunctionBody<'_>], relocs: &[Wasm
 }
 
 fn remap_wasm_index(indices: &[u32], index: u32, kind: &str) -> Result<u32> {
-    let mapped = indices.get(index as usize).copied().ok_or_else(|| {
-        crate::error!(
+    let mapped = indices.get(index as usize).copied().with_context(|| {
+        format!(
             "Wasm {kind} index {index} out of range (map len {})",
             indices.len()
         )
@@ -7455,10 +7456,10 @@ fn count_function_and_global_imports(
     };
     let header = sections
         .get(section_index as usize)
-        .ok_or_else(|| crate::error!("Wasm import section index out of range"))?;
+        .context("Wasm import section index out of range")?;
     let payload = data
         .get(header.payload_range_usize())
-        .ok_or_else(|| crate::error!("Wasm import section payload out of bounds"))?;
+        .context("Wasm import section payload out of bounds")?;
     let reader = ImportSectionReader::new(BinaryReader::new(
         payload,
         u64::from(header.payload_range.start),
@@ -7470,12 +7471,12 @@ fn count_function_and_global_imports(
             TypeRef::Func(_) | TypeRef::FuncExact(_) => {
                 num_function_imports = num_function_imports
                     .checked_add(1)
-                    .ok_or_else(|| crate::error!("too many Wasm function imports"))?;
+                    .context("too many Wasm function imports")?;
             }
             TypeRef::Global(_) => {
                 num_global_imports = num_global_imports
                     .checked_add(1)
-                    .ok_or_else(|| crate::error!("too many Wasm global imports"))?;
+                    .context("too many Wasm global imports")?;
             }
             _ => {}
         }
@@ -7494,10 +7495,10 @@ fn section_entry_count(
     };
     let header = sections
         .get(section_index as usize)
-        .ok_or_else(|| crate::error!("Wasm section index out of range"))?;
+        .context("Wasm section index out of range")?;
     let payload = data
         .get(header.payload_range_usize())
-        .ok_or_else(|| crate::error!("Wasm section payload out of bounds"))?;
+        .context("Wasm section payload out of bounds")?;
     let mut reader = BinaryReader::new(payload, u64::from(header.payload_range.start));
     Ok(reader.read_var_u32()?)
 }

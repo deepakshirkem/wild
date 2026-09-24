@@ -5,7 +5,6 @@ use crate::alignment::Alignment;
 use crate::args::macho::MachOArgs;
 use crate::bail;
 use crate::ensure;
-use crate::error;
 use crate::error::Context;
 use crate::error::Result;
 use crate::file_kind::FileKind;
@@ -494,7 +493,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
             .n_value
             .get(LE)
             .checked_sub(section.addr.get(LE))
-            .ok_or_else(|| error!("Mach-O symbol value is before its section address"))
+            .context("Mach-O symbol value is before its section address")
     }
 
     fn num_sections(&self) -> usize {
@@ -577,7 +576,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
         let section = self
             .sections()
             .get(index.0)
-            .ok_or(error!("section index out of range"))?;
+            .context("section index out of range")?;
         Ok(section.name())
     }
 
@@ -597,7 +596,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
     fn copy_section_data(&self, section: &SectionHeader, out: &mut [u8]) -> Result {
         let data = section
             .data(LE, self.data, section.offset(LE).into())
-            .map_err(|_e| error!("cannot get section data"))?;
+            .context("cannot get section data")?;
         copy_section_data(data, out);
 
         Ok(())
@@ -620,7 +619,7 @@ impl<'data> platform::ObjectFile<'data> for File<'data> {
             relocations: self
                 .sections()
                 .get(index.0)
-                .ok_or(error!("section index out of range"))?
+                .context("section index out of range")?
                 .relocations(LE, self.data)?,
         })
     }
@@ -1561,8 +1560,8 @@ impl platform::Platform for MachO {
                 resolutions
                     .get(symbol_id)
                     .map(|resolution| resolution.raw_value)
-                    .ok_or_else(|| {
-                        error!("missing resolution for Mach-O initializer {symbol_id:?}")
+                    .with_context(|| {
+                        format!("missing resolution for Mach-O initializer {symbol_id:?}")
                     })
             })
             .collect::<Result<Vec<_>>>()?;
