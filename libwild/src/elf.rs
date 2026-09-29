@@ -255,8 +255,6 @@ pub(crate) trait ElfClass: Copy + Default + Send + Sync + std::fmt::Debug + 'sta
     const VERSION_D_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
     const VERSION_R_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
     const GNU_PROPERTY_ALIGNMENT: Alignment = Self::ADDRESS_ALIGNMENT;
-    const GNU_PROPERTY_ENTRY_SIZE: u64 =
-        Self::GNU_PROPERTY_ALIGNMENT.align_up(size_of::<NoteProperty>() as u64);
 }
 
 pub(crate) trait ElfSymbol:
@@ -2921,6 +2919,9 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 return SectionRuleOutcome::Discard;
             }
             secnames::RISCV_ATTRIBUTES_SECTION_NAME => return SectionRuleOutcome::RiscVAttribute,
+            b".ARM.attributes" if args.architecture() == Architecture::AArch64 => {
+                return SectionRuleOutcome::AArch64Attribute;
+            }
             secnames::NOTE_GNU_PROPERTY_SECTION_NAME => return SectionRuleOutcome::NoteGnuProperty,
             secnames::NOTE_ABI_TAG_SECTION_NAME => {
                 return SectionRuleOutcome::Section(crate::layout_rules::SectionOutputInfo::keep(
@@ -3482,13 +3483,14 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
                 // Right now, skip all properties other than those with size equal to 4.
                 // There are existing properties, but unused right now:
                 // GNU_PROPERTY_STACK_SIZE, GNU_PROPERTY_NO_COPY_ON_PROTECTED
-                // TODO: support in the future
-                if gnu_property.pr_data().len() != 4 {
+                // TODO: support in the future.
+                if gnu_property.pr_data().len() != size_of::<u32>() {
                     continue;
                 }
+
                 state.gnu_property_notes.push(crate::elf::GnuProperty {
                     ptype: gnu_property.pr_type(),
-                    data: gnu_property.data_u32(e)?,
+                    data: GnuPropertyData::U32(gnu_property.data_u32(e)?),
                 });
             }
         }
@@ -4327,10 +4329,45 @@ pub(crate) enum PropertyClass {
     AndOr,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum GnuPropertyData {
+    U32(u32),
+    AArch64PAuth { platform: u64, version: u64 },
+}
+
+impl GnuPropertyData {
+    pub(crate) fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::U32(data) => Some(*data),
+            Self::AArch64PAuth { .. } => None,
+        }
+    }
+
+    pub(crate) fn as_u32_mut(&mut self) -> Option<&mut u32> {
+        match self {
+            Self::U32(data) => Some(data),
+            Self::AArch64PAuth { .. } => None,
+        }
+    }
+
+    pub(crate) fn data_size(&self) -> u64 {
+        match self {
+            Self::U32(_) => size_of::<u32>() as u64,
+            Self::AArch64PAuth { .. } => 2 * size_of::<u64>() as u64,
+        }
+    }
+
+    pub(crate) fn entry_size<C: ElfClass>(&self) -> u64 {
+        const PROPERTY_HEADER_SIZE: u64 = 2 * size_of::<u32>() as u64;
+
+        C::GNU_PROPERTY_ALIGNMENT.align_up(PROPERTY_HEADER_SIZE + self.data_size())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GnuProperty {
     pub(crate) ptype: object::elf::GnuPropertyType,
-    pub(crate) data: u32,
+    pub(crate) data: GnuPropertyData,
 }
 
 #[derive(Debug)]
@@ -4369,10 +4406,18 @@ pub(crate) enum RiscVAttribute {
     PrivilegedSpecRevision(u64),
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct AArch64BuildAttributes {
+    pub(crate) has_section: bool,
+    pub(crate) feature_and_bits: Option<u32>,
+    pub(crate) pauth: Option<(u64, u64)>,
+}
+
 #[derive(Default)]
 pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     gnu_property_notes: Vec<GnuProperty>,
     pub(crate) riscv_attributes: Vec<RiscVAttribute>,
+    pub(crate) aarch64_build_attributes: AArch64BuildAttributes,
 
     has_eh_frame_input: bool,
 
@@ -4407,8 +4452,10 @@ impl LayoutExt {
         args: &ElfArgs,
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
-        let gnu_property_notes =
+        let mut gnu_property_notes =
             merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, args.force_ibt);
+
+        merge_aarch64_build_attributes(states.clone(), &mut gnu_property_notes)?;
         if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
@@ -4441,7 +4488,8 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
     let feature_bits = props
         .iter()
         .find(|p| p.ptype == object::elf::GNU_PROPERTY_X86_FEATURE_1_AND)
-        .map_or(0, |p| p.data);
+        .and_then(|p| p.data.as_u32())
+        .unwrap_or(0);
 
     if args.force_ibt && (feature_bits & GNU_PROPERTY_X86_FEATURE_1_IBT == 0) {
         args.warning(format!(
@@ -4494,12 +4542,15 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
             let Some(property_class) = A::get_property_class(prop.ptype.0) else {
                 continue;
             };
+            let Some(data) = prop.data.as_u32() else {
+                continue;
+            };
             file_map
                 .entry(prop.ptype)
                 .and_modify(|entry: &mut (u32, PropertyClass)| {
-                    entry.0 |= prop.data;
+                    entry.0 |= data;
                 })
-                .or_insert_with(|| (prop.data, property_class));
+                .or_insert_with(|| (data, property_class));
         }
         // Then AND across files to keep only features all files support.
         for (ptype, (data, class)) in file_map {
@@ -4542,7 +4593,7 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
             } {
                 Some(GnuProperty {
                     ptype: property_type,
-                    data: property_value,
+                    data: GnuPropertyData::U32(property_value),
                 })
             } else {
                 None
@@ -4557,17 +4608,114 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
             .iter_mut()
             .find(|p| p.ptype == GNU_PROPERTY_X86_FEATURE_1_AND)
         {
-            prop.data |= GNU_PROPERTY_X86_FEATURE_1_IBT;
+            if let Some(data) = prop.data.as_u32_mut() {
+                *data |= GNU_PROPERTY_X86_FEATURE_1_IBT;
+            }
         } else {
             output.push(GnuProperty {
                 ptype: GNU_PROPERTY_X86_FEATURE_1_AND,
-                data: GNU_PROPERTY_X86_FEATURE_1_IBT,
+                data: GnuPropertyData::U32(GNU_PROPERTY_X86_FEATURE_1_IBT),
             });
             output.sort_by_key(|p| p.ptype);
         }
     }
 
     output
+}
+
+fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
+    states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>> + Clone,
+    output: &mut Vec<GnuProperty>,
+) -> Result {
+    if !states
+        .clone()
+        .any(|state| state.aarch64_build_attributes.has_section)
+    {
+        return Ok(());
+    }
+
+    // Mixing the legacy AArch64 GNU feature property with build attributes is
+    // intentionally deferred to the follow-up implementation.
+    ensure!(
+        !states.clone().any(|state| {
+            state
+                .gnu_property_notes
+                .iter()
+                .any(|property| property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND)
+        }),
+        "mixing AArch64 build attributes with GNU feature properties is not supported yet"
+    );
+
+    let mut merged_features = None;
+    let mut saw_feature_attributes = false;
+    let mut merged_pauth = None;
+
+    for state in states {
+        let attributes = state.aarch64_build_attributes;
+
+        if attributes.feature_and_bits.is_some() {
+            saw_feature_attributes = true;
+        }
+
+        // An omitted public feature attribute has value zero. Once any input
+        // uses AArch64 build attributes, every input participates in the AND.
+        let features = attributes.feature_and_bits.unwrap_or(0);
+
+        merged_features = Some(match merged_features {
+            Some(previous) => previous & features,
+            None => features,
+        });
+
+        if let Some(pauth) = attributes.pauth {
+            // (0, 0) is the default value and does not mark the object as
+            // using a PAuth ABI.
+            if pauth == (0, 0) {
+                continue;
+            }
+
+            if let Some(previous) = merged_pauth {
+                ensure!(
+                    previous == pauth,
+                    "incompatible AArch64 PAuth build attributes"
+                );
+            } else {
+                merged_pauth = Some(pauth);
+            }
+        }
+    }
+
+    if saw_feature_attributes
+        && let Some(features) = merged_features
+        && features != 0
+    {
+        output.push(GnuProperty {
+            ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND,
+            data: GnuPropertyData::U32(features),
+        });
+    }
+
+    if let Some((platform, version)) = merged_pauth {
+        // Build-attribute (0, 1) represents the invalid PAuth platform and is
+        // encoded as GNU PAuth core information (0, 0).
+        let (platform, version) = if platform == 0 {
+            ensure!(
+                version == 1,
+                "reserved AArch64 PAuth build attribute tuple (0, {version})"
+            );
+            (0, 0)
+        } else {
+            (platform, version)
+        };
+
+        output.push(GnuProperty {
+            ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH,
+            data: GnuPropertyData::AArch64PAuth { platform, version },
+        });
+    }
+
+    output.sort_by_key(|property| property.ptype);
+
+    Ok(())
 }
 
 fn merge_eflags<'files, 'data: 'files, C: ElfClass, A: Arch<Platform = Elf<C>>>(
@@ -4732,7 +4880,10 @@ pub(crate) fn gnu_property_notes_section_size<C: ElfClass>(
     } else {
         C::NOTE_HEADER_SIZE
             + GNU_NOTE_NAME.len() as u64
-            + gnu_property_notes.len() as u64 * C::GNU_PROPERTY_ENTRY_SIZE
+            + gnu_property_notes
+                .iter()
+                .map(|property| property.data.entry_size::<C>())
+                .sum::<u64>()
     }
 }
 
@@ -4766,6 +4917,100 @@ fn riscv_attributes_section_size(riscv_attributes: &[RiscVAttribute]) -> u64 {
             + RISCV_ATTRIBUTE_VENDOR_NAME.len() + 1
             + riscv_attributes.iter().map(attribute_size).sum::<usize>()
     }) as u64
+}
+
+pub(crate) fn process_aarch64_build_attributes(
+    object: &File64,
+    section_index: object::SectionIndex,
+) -> Result<AArch64BuildAttributes> {
+    let section = object.section(section_index)?;
+    let mut content = section.data(LittleEndian, object.data)?;
+
+    ensure!(content.starts_with(b"A"), "Header must start with 'A'");
+    content = &content[1..];
+
+    let mut attributes = AArch64BuildAttributes {
+        has_section: true,
+        ..AArch64BuildAttributes::default()
+    };
+
+    while !content.is_empty() {
+        let subsection_size =
+            read_u32(&mut content).context("Cannot read AArch64 subsection size")? as usize;
+
+        ensure!(
+            subsection_size >= size_of::<u32>(),
+            "Invalid AArch64 attribute subsection size"
+        );
+
+        let payload_size = subsection_size - size_of::<u32>();
+
+        ensure!(
+            content.len() >= payload_size,
+            "AArch64 attribute subsection extends beyond section"
+        );
+
+        let (mut subsection, rest) = content.split_at(payload_size);
+        content = rest;
+
+        let name = read_string(&mut subsection).context("Cannot read AArch64 subsection name")?;
+
+        ensure!(
+            subsection.len() >= 2,
+            "Invalid AArch64 attribute subsection header"
+        );
+
+        let parameter_type = subsection[1];
+        subsection = &subsection[2..];
+
+        // Public build attributes used here have ULEB128 parameters.
+        if parameter_type != 0 {
+            continue;
+        }
+
+        match name.as_str() {
+            "aeabi_feature_and_bits" => {
+                let mut feature_bits = 0_u32;
+
+                while !subsection.is_empty() {
+                    let tag =
+                        read_uleb128(&mut subsection).context("Cannot read AArch64 feature tag")?;
+                    let value = read_uleb128(&mut subsection)
+                        .context("Cannot read AArch64 feature value")?;
+
+                    if value != 0 && tag < u64::from(u32::BITS) {
+                        feature_bits |= 1_u32 << tag;
+                    }
+                }
+
+                attributes.feature_and_bits = Some(feature_bits);
+            }
+
+            "aeabi_pauthabi" => {
+                let mut platform = 0_u64;
+                let mut version = 0_u64;
+
+                while !subsection.is_empty() {
+                    let tag =
+                        read_uleb128(&mut subsection).context("Cannot read AArch64 PAuth tag")?;
+                    let value =
+                        read_uleb128(&mut subsection).context("Cannot read AArch64 PAuth value")?;
+
+                    match tag {
+                        1 => platform = value,
+                        2 => version = value,
+                        _ => {}
+                    }
+                }
+
+                attributes.pauth = Some((platform, version));
+            }
+
+            _ => {}
+        }
+    }
+
+    Ok(attributes)
 }
 
 pub(crate) fn process_riscv_attributes(
