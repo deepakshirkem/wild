@@ -5144,12 +5144,16 @@ fn write_gnu_property_notes<C: ElfClass>(
                 padding.fill(0);
             }
             elf::GnuPropertyData::AArch64PAuth { platform, version } => {
-                entry.fill(0);
+                let (property_bytes, padding) =
+                    entry.split_at_mut(size_of::<elf::AArch64PAuthProperty>());
+                let property = elf::AArch64PAuthProperty::mut_from_bytes(property_bytes).unwrap();
 
-                entry[0..4].copy_from_slice(&note.ptype.0.to_le_bytes());
-                entry[4..8].copy_from_slice(&(16_u32).to_le_bytes());
-                entry[8..16].copy_from_slice(&platform.to_le_bytes());
-                entry[16..24].copy_from_slice(&version.to_le_bytes());
+                property.pr_type = note.ptype.0;
+                property.pr_datasz = (2 * size_of::<u64>()) as u32;
+                property.platform = platform;
+                property.version = version;
+
+                padding.fill(0);
             }
         }
     }

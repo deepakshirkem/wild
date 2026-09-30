@@ -2919,7 +2919,9 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
                 return SectionRuleOutcome::Discard;
             }
             secnames::RISCV_ATTRIBUTES_SECTION_NAME => return SectionRuleOutcome::RiscVAttribute,
-            b".ARM.attributes" if args.architecture() == Architecture::AArch64 => {
+            secnames::ARM_ATTRIBUTES_SECTION_NAME
+                if args.architecture() == Architecture::AArch64 =>
+            {
                 return SectionRuleOutcome::AArch64Attribute;
             }
             secnames::NOTE_GNU_PROPERTY_SECTION_NAME => return SectionRuleOutcome::NoteGnuProperty,
@@ -4210,6 +4212,21 @@ pub(crate) struct NoteProperty {
     pub(crate) pr_data: u32,
 }
 
+/// GNU_PROPERTY_AARCH64_FEATURE_PAUTH.
+///
+/// The PAuth ABI defines pr_data as two 64-bit words: the platform
+/// identifier followed by the version number.
+///
+/// https://github.com/ARM-software/abi-aa/blob/main/pauthabielf64/pauthabielf64.rst
+#[derive(FromBytes, IntoBytes, KnownLayout, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct AArch64PAuthProperty {
+    pub(crate) pr_type: u32,
+    pub(crate) pr_datasz: u32,
+    pub(crate) platform: u64,
+    pub(crate) version: u64,
+}
+
 pub(crate) struct PageMaskValue {
     pub(crate) symbol_plus_addend: u64,
     pub(crate) got_entry: u64,
@@ -4424,7 +4441,6 @@ pub(crate) enum RiscVAttribute {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct AArch64BuildAttributes {
-    pub(crate) has_section: bool,
     pub(crate) feature_and_bits: Option<u32>,
     pub(crate) pauth: Option<(u64, u64)>,
 }
@@ -4433,7 +4449,7 @@ pub(crate) struct AArch64BuildAttributes {
 pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
     gnu_property_notes: Vec<GnuProperty>,
     pub(crate) riscv_attributes: Vec<RiscVAttribute>,
-    pub(crate) aarch64_build_attributes: AArch64BuildAttributes,
+    pub(crate) aarch64_build_attributes: Option<AArch64BuildAttributes>,
 
     has_eh_frame_input: bool,
 
@@ -4645,7 +4661,7 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
 ) -> Result {
     let has_build_attributes = states
         .clone()
-        .any(|state| state.aarch64_build_attributes.has_section);
+        .any(|state| state.aarch64_build_attributes.is_some());
 
     // GNU_PROPERTY_AARCH64_FEATURE_PAUTH has a 16-byte payload and therefore
     // isn't handled by the generic u32 GNU property merge above. Preserve and
@@ -4722,27 +4738,37 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
         "mixing AArch64 build attributes with GNU properties is not supported yet"
     );
 
-    let mut merged_features = None;
-    let mut saw_feature_attributes = false;
+    let merged_features = states
+        .clone()
+        .any(|state| {
+            state
+                .aarch64_build_attributes
+                .and_then(|attributes| attributes.feature_and_bits)
+                .is_some()
+        })
+        .then(|| {
+            states.clone().fold(u32::MAX, |features, state| {
+                features
+                    & state
+                        .aarch64_build_attributes
+                        .and_then(|attributes| attributes.feature_and_bits)
+                        .unwrap_or(0)
+            })
+        });
+
     let mut merged_pauth = None;
 
     for state in states {
-        let attributes = state.aarch64_build_attributes;
-
-        if attributes.feature_and_bits.is_some() {
-            saw_feature_attributes = true;
-        }
-
-        // An omitted public feature attribute has value zero. Once any input
-        // uses AArch64 build attributes, every input participates in the AND.
-        let features = attributes.feature_and_bits.unwrap_or(0);
-
-        merged_features = Some(match merged_features {
-            Some(previous) => previous & features,
-            None => features,
-        });
+        let attributes = state.aarch64_build_attributes.unwrap_or_default();
 
         if let Some(pauth) = attributes.pauth {
+            // PAuth build attributes are merged as the tuple
+            // (Tag_PAuth_Platform, Tag_PAuth_Schema). Non-zero tuples are
+            // compatible only when they are identical.
+            //
+            // https://github.com/ARM-software/abi-aa/blob/main/buildattr64/buildattr64.rst
+            // See "Combining attribute values of aeabi_pauthabi".
+            //
             // (0, 0) is the default value and does not mark the object as
             // using a PAuth ABI.
             if pauth == (0, 0) {
@@ -4760,8 +4786,7 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
         }
     }
 
-    if saw_feature_attributes
-        && let Some(features) = merged_features
+    if let Some(features) = merged_features
         && features != 0
     {
         output.push(GnuProperty {
@@ -5005,10 +5030,7 @@ pub(crate) fn process_aarch64_build_attributes(
     ensure!(content.starts_with(b"A"), "Header must start with 'A'");
     content = &content[1..];
 
-    let mut attributes = AArch64BuildAttributes {
-        has_section: true,
-        ..AArch64BuildAttributes::default()
-    };
+    let mut attributes = AArch64BuildAttributes::default();
 
     while !content.is_empty() {
         let subsection_size =
@@ -5067,6 +5089,8 @@ pub(crate) fn process_aarch64_build_attributes(
                         read_uleb128(&mut subsection).context("Cannot read AArch64 feature tag")?;
                     let value = read_uleb128(&mut subsection)
                         .context("Cannot read AArch64 feature value")?;
+
+                    ensure!(tag < 128, "Invalid AArch64 feature tag {tag}");
 
                     if value != 0 && tag < u64::from(u32::BITS) {
                         feature_bits |= 1_u32 << tag;
