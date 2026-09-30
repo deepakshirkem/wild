@@ -3480,16 +3480,32 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
             {
                 let gnu_property = gnu_property?;
 
-                // Right now, skip all properties other than those with size equal to 4.
-                // There are existing properties, but unused right now:
-                // GNU_PROPERTY_STACK_SIZE, GNU_PROPERTY_NO_COPY_ON_PROTECTED
-                // TODO: support in the future.
-                if gnu_property.pr_data().len() != size_of::<u32>() {
+                let ptype = gnu_property.pr_type();
+                let data = gnu_property.pr_data();
+
+                if ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH {
+                    ensure!(
+                        data.len() == 2 * size_of::<u64>(),
+                        "Invalid AArch64 PAuth GNU property size"
+                    );
+
+                    let platform = u64::from_le_bytes(data[..8].try_into().unwrap());
+                    let version = u64::from_le_bytes(data[8..16].try_into().unwrap());
+
+                    state.gnu_property_notes.push(crate::elf::GnuProperty {
+                        ptype,
+                        data: GnuPropertyData::AArch64PAuth { platform, version },
+                    });
+                    continue;
+                }
+
+                // Other supported GNU properties currently have 4-byte payloads.
+                if data.len() != size_of::<u32>() {
                     continue;
                 }
 
                 state.gnu_property_notes.push(crate::elf::GnuProperty {
-                    ptype: gnu_property.pr_type(),
+                    ptype,
                     data: GnuPropertyData::U32(gnu_property.data_u32(e)?),
                 });
             }
@@ -4627,23 +4643,83 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>> + Clone,
     output: &mut Vec<GnuProperty>,
 ) -> Result {
-    if !states
+    let has_build_attributes = states
         .clone()
-        .any(|state| state.aarch64_build_attributes.has_section)
-    {
+        .any(|state| state.aarch64_build_attributes.has_section);
+
+    // GNU_PROPERTY_AARCH64_FEATURE_PAUTH has a 16-byte payload and therefore
+    // isn't handled by the generic u32 GNU property merge above. Preserve and
+    // validate it here when relinking GNU-property inputs.
+    if !has_build_attributes {
+        let mut saw_pauth = false;
+        let mut merged_pauth = None;
+
+        for state in states {
+            let mut file_pauth = None;
+
+            for property in &state.gnu_property_notes {
+                if property.ptype != object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH {
+                    continue;
+                }
+
+                let GnuPropertyData::AArch64PAuth { platform, version } = property.data else {
+                    bail!("invalid AArch64 PAuth GNU property representation");
+                };
+
+                let pauth = (platform, version);
+
+                if let Some(previous) = file_pauth {
+                    ensure!(
+                        previous == pauth,
+                        "incompatible AArch64 PAuth GNU properties in input file"
+                    );
+                } else {
+                    file_pauth = Some(pauth);
+                }
+            }
+
+            if file_pauth.is_some() {
+                saw_pauth = true;
+            }
+
+            // An input with no PAuth marking contributes the reserved
+            // incompatible value (0, 0).
+            let pauth = file_pauth.unwrap_or((0, 0));
+
+            if let Some(previous) = merged_pauth {
+                ensure!(
+                    previous == pauth,
+                    "incompatible AArch64 PAuth GNU properties"
+                );
+            } else {
+                merged_pauth = Some(pauth);
+            }
+        }
+
+        if saw_pauth {
+            let (platform, version) = merged_pauth.unwrap();
+
+            output.push(GnuProperty {
+                ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH,
+                data: GnuPropertyData::AArch64PAuth { platform, version },
+            });
+
+            output.sort_by_key(|property| property.ptype);
+        }
+
         return Ok(());
     }
 
-    // Mixing the legacy AArch64 GNU feature property with build attributes is
-    // intentionally deferred to the follow-up implementation.
+    // Mixing AArch64 GNU properties with build attributes is intentionally
+    // deferred to the follow-up implementation.
     ensure!(
         !states.clone().any(|state| {
-            state
-                .gnu_property_notes
-                .iter()
-                .any(|property| property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND)
+            state.gnu_property_notes.iter().any(|property| {
+                property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND
+                    || property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH
+            })
         }),
-        "mixing AArch64 build attributes with GNU feature properties is not supported yet"
+        "mixing AArch64 build attributes with GNU properties is not supported yet"
     );
 
     let mut merged_features = None;
@@ -4960,16 +5036,30 @@ pub(crate) fn process_aarch64_build_attributes(
             "Invalid AArch64 attribute subsection header"
         );
 
+        let comprehension = subsection[0];
         let parameter_type = subsection[1];
         subsection = &subsection[2..];
 
-        // Public build attributes used here have ULEB128 parameters.
-        if parameter_type != 0 {
-            continue;
-        }
+        ensure!(
+            comprehension <= 1,
+            "Invalid AArch64 build attribute comprehension value {comprehension}"
+        );
+        ensure!(
+            parameter_type <= 1,
+            "Invalid AArch64 build attribute parameter type {parameter_type}"
+        );
 
         match name.as_str() {
             "aeabi_feature_and_bits" => {
+                ensure!(
+                    comprehension == 1,
+                    "aeabi_feature_and_bits must be optional"
+                );
+                ensure!(
+                    parameter_type == 0,
+                    "aeabi_feature_and_bits must use ULEB128 values"
+                );
+
                 let mut feature_bits = 0_u32;
 
                 while !subsection.is_empty() {
@@ -4987,6 +5077,12 @@ pub(crate) fn process_aarch64_build_attributes(
             }
 
             "aeabi_pauthabi" => {
+                ensure!(comprehension == 0, "aeabi_pauthabi must be required");
+                ensure!(
+                    parameter_type == 0,
+                    "aeabi_pauthabi must use ULEB128 values"
+                );
+
                 let mut platform = 0_u64;
                 let mut version = 0_u64;
 
@@ -4999,14 +5095,21 @@ pub(crate) fn process_aarch64_build_attributes(
                     match tag {
                         1 => platform = value,
                         2 => version = value,
-                        _ => {}
+                        _ => {
+                            bail!("Unrecognized tag {tag} in required AArch64 subsection `{name}`");
+                        }
                     }
                 }
 
                 attributes.pauth = Some((platform, version));
             }
 
-            _ => {}
+            _ => {
+                ensure!(
+                    !name.starts_with("aeabi_") || comprehension == 1,
+                    "Unsupported required AArch64 build attribute subsection `{name}`"
+                );
+            }
         }
     }
 
