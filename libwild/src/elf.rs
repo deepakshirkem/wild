@@ -4665,9 +4665,11 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>> + Clone,
     output: &mut Vec<GnuProperty>,
 ) -> Result {
-    let has_build_attributes = states
-        .clone()
-        .any(|state| state.aarch64_build_attributes.is_some());
+    let has_build_attributes = states.clone().any(|state| {
+        state.aarch64_build_attributes.is_some_and(|attributes| {
+            attributes.feature_and_bits.is_some() || attributes.pauth.is_some()
+        })
+    });
 
     // GNU_PROPERTY_AARCH64_FEATURE_PAUTH has a 16-byte payload and therefore
     // isn't handled by the generic u32 GNU property merge above. Preserve and
