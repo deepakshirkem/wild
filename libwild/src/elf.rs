@@ -3496,7 +3496,7 @@ impl<'data, C: ElfClass> platform::ObjectFile<'data> for File<'data, C> {
 
                     state.gnu_property_notes.push(crate::elf::GnuProperty {
                         ptype,
-                        data: GnuPropertyData::AArch64PAuth { platform, version },
+                        data: GnuPropertyData::AArch64PAuth(AArch64PAuth { platform, version }),
                     });
                     continue;
                 }
@@ -4362,31 +4362,37 @@ pub(crate) enum PropertyClass {
     AndOr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct AArch64PAuth {
+    pub(crate) platform: u64,
+    pub(crate) version: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GnuPropertyData {
     U32(u32),
-    AArch64PAuth { platform: u64, version: u64 },
+    AArch64PAuth(AArch64PAuth),
 }
 
 impl GnuPropertyData {
     pub(crate) fn as_u32(&self) -> Option<u32> {
         match self {
             Self::U32(data) => Some(*data),
-            Self::AArch64PAuth { .. } => None,
+            Self::AArch64PAuth(_) => None,
         }
     }
 
     pub(crate) fn as_u32_mut(&mut self) -> Option<&mut u32> {
         match self {
             Self::U32(data) => Some(data),
-            Self::AArch64PAuth { .. } => None,
+            Self::AArch64PAuth(_) => None,
         }
     }
 
     pub(crate) fn data_size(&self) -> u64 {
         match self {
             Self::U32(_) => size_of::<u32>() as u64,
-            Self::AArch64PAuth { .. } => 2 * size_of::<u64>() as u64,
+            Self::AArch64PAuth(_) => 2 * size_of::<u64>() as u64,
         }
     }
 
@@ -4442,7 +4448,7 @@ pub(crate) enum RiscVAttribute {
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct AArch64BuildAttributes {
     pub(crate) feature_and_bits: Option<u32>,
-    pub(crate) pauth: Option<(u64, u64)>,
+    pub(crate) pauth: Option<AArch64PAuth>,
 }
 
 #[derive(Default)]
@@ -4667,57 +4673,58 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
     // isn't handled by the generic u32 GNU property merge above. Preserve and
     // validate it here when relinking GNU-property inputs.
     if !has_build_attributes {
-        let mut saw_pauth = false;
-        let mut merged_pauth = None;
+        let pauth_per_file = states
+            .map(|state| {
+                let pauth_values = state
+                    .gnu_property_notes
+                    .iter()
+                    .filter(|property| {
+                        property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH
+                    })
+                    .map(|property| {
+                        let GnuPropertyData::AArch64PAuth(pauth) = property.data else {
+                            bail!("invalid AArch64 PAuth GNU property representation");
+                        };
 
-        for state in states {
-            let mut file_pauth = None;
+                        Ok(pauth)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
-            for property in &state.gnu_property_notes {
-                if property.ptype != object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH {
-                    continue;
-                }
+                let unique_pauth = pauth_values.into_iter().unique().collect_vec();
 
-                let GnuPropertyData::AArch64PAuth { platform, version } = property.data else {
-                    bail!("invalid AArch64 PAuth GNU property representation");
-                };
+                ensure!(
+                    unique_pauth.len() <= 1,
+                    "incompatible AArch64 PAuth GNU properties in input file"
+                );
 
-                let pauth = (platform, version);
+                Ok(unique_pauth.into_iter().next())
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-                if let Some(previous) = file_pauth {
-                    ensure!(
-                        previous == pauth,
-                        "incompatible AArch64 PAuth GNU properties in input file"
-                    );
-                } else {
-                    file_pauth = Some(pauth);
-                }
-            }
-
-            if file_pauth.is_some() {
-                saw_pauth = true;
-            }
-
+        if pauth_per_file.iter().any(Option::is_some) {
             // An input with no PAuth marking contributes the reserved
             // incompatible value (0, 0).
-            let pauth = file_pauth.unwrap_or((0, 0));
+            let unique_pauth = pauth_per_file
+                .into_iter()
+                .map(|pauth| {
+                    pauth.unwrap_or(AArch64PAuth {
+                        platform: 0,
+                        version: 0,
+                    })
+                })
+                .unique()
+                .collect_vec();
 
-            if let Some(previous) = merged_pauth {
-                ensure!(
-                    previous == pauth,
-                    "incompatible AArch64 PAuth GNU properties"
-                );
-            } else {
-                merged_pauth = Some(pauth);
-            }
-        }
+            ensure!(
+                unique_pauth.len() == 1,
+                "incompatible AArch64 PAuth GNU properties"
+            );
 
-        if saw_pauth {
-            let (platform, version) = merged_pauth.unwrap();
+            let pauth = unique_pauth[0];
 
             output.push(GnuProperty {
                 ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH,
-                data: GnuPropertyData::AArch64PAuth { platform, version },
+                data: GnuPropertyData::AArch64PAuth(pauth),
             });
 
             output.sort_by_key(|property| property.ptype);
@@ -4756,35 +4763,22 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
             })
         });
 
-    let mut merged_pauth = None;
+    let unique_pauth = states
+        .filter_map(|state| {
+            state
+                .aarch64_build_attributes
+                .and_then(|attributes| attributes.pauth)
+        })
+        .filter(|pauth| pauth.platform != 0 || pauth.version != 0)
+        .unique()
+        .collect_vec();
 
-    for state in states {
-        let attributes = state.aarch64_build_attributes.unwrap_or_default();
+    ensure!(
+        unique_pauth.len() <= 1,
+        "incompatible AArch64 PAuth build attributes"
+    );
 
-        if let Some(pauth) = attributes.pauth {
-            // PAuth build attributes are merged as the tuple
-            // (Tag_PAuth_Platform, Tag_PAuth_Schema). Non-zero tuples are
-            // compatible only when they are identical.
-            //
-            // https://github.com/ARM-software/abi-aa/blob/main/buildattr64/buildattr64.rst
-            // See "Combining attribute values of aeabi_pauthabi".
-            //
-            // (0, 0) is the default value and does not mark the object as
-            // using a PAuth ABI.
-            if pauth == (0, 0) {
-                continue;
-            }
-
-            if let Some(previous) = merged_pauth {
-                ensure!(
-                    previous == pauth,
-                    "incompatible AArch64 PAuth build attributes"
-                );
-            } else {
-                merged_pauth = Some(pauth);
-            }
-        }
-    }
+    let merged_pauth = unique_pauth.into_iter().next();
 
     if let Some(features) = merged_features
         && features != 0
@@ -4795,22 +4789,26 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
         });
     }
 
-    if let Some((platform, version)) = merged_pauth {
+    if let Some(pauth) = merged_pauth {
         // Build-attribute (0, 1) represents the invalid PAuth platform and is
         // encoded as GNU PAuth core information (0, 0).
-        let (platform, version) = if platform == 0 {
+        let pauth = if pauth.platform == 0 {
             ensure!(
-                version == 1,
-                "reserved AArch64 PAuth build attribute tuple (0, {version})"
+                pauth.version == 1,
+                "reserved AArch64 PAuth build attribute tuple (0, {})",
+                pauth.version
             );
-            (0, 0)
+            AArch64PAuth {
+                platform: 0,
+                version: 0,
+            }
         } else {
-            (platform, version)
+            pauth
         };
 
         output.push(GnuProperty {
             ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH,
-            data: GnuPropertyData::AArch64PAuth { platform, version },
+            data: GnuPropertyData::AArch64PAuth(pauth),
         });
     }
 
@@ -5125,7 +5123,7 @@ pub(crate) fn process_aarch64_build_attributes(
                     }
                 }
 
-                attributes.pauth = Some((platform, version));
+                attributes.pauth = Some(AArch64PAuth { platform, version });
             }
 
             _ => {
