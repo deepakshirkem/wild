@@ -4692,21 +4692,21 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let unique_pauth = pauth_values.into_iter().unique().collect_vec();
+                let pauth = match pauth_values.into_iter().unique().at_most_one() {
+                    Ok(pauth) => pauth,
+                    Err(_) => {
+                        bail!("incompatible AArch64 PAuth GNU properties in input file")
+                    }
+                };
 
-                ensure!(
-                    unique_pauth.len() <= 1,
-                    "incompatible AArch64 PAuth GNU properties in input file"
-                );
-
-                Ok(unique_pauth.into_iter().next())
+                Ok(pauth)
             })
             .collect::<Result<Vec<_>>>()?;
 
         if pauth_per_file.iter().any(Option::is_some) {
             // An input with no PAuth marking contributes the reserved
             // incompatible value (0, 0).
-            let unique_pauth = pauth_per_file
+            let pauth = match pauth_per_file
                 .into_iter()
                 .map(|pauth| {
                     pauth.unwrap_or(AArch64PAuth {
@@ -4715,14 +4715,11 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
                     })
                 })
                 .unique()
-                .collect_vec();
-
-            ensure!(
-                unique_pauth.len() == 1,
-                "incompatible AArch64 PAuth GNU properties"
-            );
-
-            let pauth = unique_pauth[0];
+                .exactly_one()
+            {
+                Ok(pauth) => pauth,
+                Err(_) => bail!("incompatible AArch64 PAuth GNU properties"),
+            };
 
             output.push(GnuProperty {
                 ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_PAUTH,
@@ -4765,7 +4762,7 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
             })
         });
 
-    let unique_pauth = states
+    let merged_pauth = match states
         .filter_map(|state| {
             state
                 .aarch64_build_attributes
@@ -4773,14 +4770,11 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
         })
         .filter(|pauth| pauth.platform != 0 || pauth.version != 0)
         .unique()
-        .collect_vec();
-
-    ensure!(
-        unique_pauth.len() <= 1,
-        "incompatible AArch64 PAuth build attributes"
-    );
-
-    let merged_pauth = unique_pauth.into_iter().next();
+        .at_most_one()
+    {
+        Ok(pauth) => pauth,
+        Err(_) => bail!("incompatible AArch64 PAuth build attributes"),
+    };
 
     if let Some(features) = merged_features
         && features != 0
