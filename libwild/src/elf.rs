@@ -4692,11 +4692,8 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                let pauth = match pauth_values.into_iter().unique().at_most_one() {
-                    Ok(pauth) => pauth,
-                    Err(_) => {
-                        bail!("incompatible AArch64 PAuth GNU properties in input file")
-                    }
+                let Ok(pauth) = pauth_values.into_iter().unique().at_most_one() else {
+                    bail!("incompatible AArch64 PAuth GNU properties in input file")
                 };
 
                 Ok(pauth)
@@ -4706,7 +4703,7 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
         if pauth_per_file.iter().any(Option::is_some) {
             // An input with no PAuth marking contributes the reserved
             // incompatible value (0, 0).
-            let pauth = match pauth_per_file
+            let Ok(pauth) = pauth_per_file
                 .into_iter()
                 .map(|pauth| {
                     pauth.unwrap_or(AArch64PAuth {
@@ -4716,9 +4713,8 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
                 })
                 .unique()
                 .exactly_one()
-            {
-                Ok(pauth) => pauth,
-                Err(_) => bail!("incompatible AArch64 PAuth GNU properties"),
+            else {
+                bail!("incompatible AArch64 PAuth GNU properties")
             };
 
             output.push(GnuProperty {
@@ -4762,7 +4758,7 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
             })
         });
 
-    let merged_pauth = match states
+    let Ok(merged_pauth) = states
         .filter_map(|state| {
             state
                 .aarch64_build_attributes
@@ -4771,9 +4767,8 @@ fn merge_aarch64_build_attributes<'states, 'data: 'states, C: ElfClass>(
         .filter(|pauth| pauth.platform != 0 || pauth.version != 0)
         .unique()
         .at_most_one()
-    {
-        Ok(pauth) => pauth,
-        Err(_) => bail!("incompatible AArch64 PAuth build attributes"),
+    else {
+        bail!("incompatible AArch64 PAuth build attributes")
     };
 
     if let Some(features) = merged_features
