@@ -2,7 +2,7 @@
 //
 //#Arch:aarch64
 //#Compiler:clang
-//#ReferenceLinkers:lld
+//#ReferenceLinkers:
 //#LinkArgs:-r
 //#RunEnabled:false
 //#DiffEnabled:false
