@@ -1588,9 +1588,22 @@ fn resolve_section<'data, P: Platform>(
     let rule_outcome = if args.should_output_partial_object() {
         P::lookup_for_partial_link(section_name, input_section, args)
     } else {
-        layout_rules
-            .section_rules
-            .lookup::<P>(section_name, file_name, input_section)
+        let outcome =
+            layout_rules
+                .section_rules
+                .lookup::<P>(section_name, file_name, input_section);
+
+        if matches!(&outcome, SectionRuleOutcome::Custom)
+            && section_name == b".ARM.attributes"
+            && matches!(
+                P::lookup_for_partial_link(section_name, input_section, args),
+                SectionRuleOutcome::AArch64Attribute
+            )
+        {
+            SectionRuleOutcome::AArch64Attribute
+        } else {
+            outcome
+        }
     };
 
     if args.orphan_handling() != OrphanHandling::Place
