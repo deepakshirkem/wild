@@ -1594,7 +1594,8 @@ fn resolve_section<'data, P: Platform>(
                 .lookup::<P>(section_name, file_name, input_section);
 
         if matches!(&outcome, SectionRuleOutcome::Custom)
-            && section_name == b".ARM.attributes"
+            && section_name
+                == linker_utils::elf::secnames::ARM_ATTRIBUTES_SECTION_NAME_STR.as_bytes()
             && matches!(
                 P::lookup_for_partial_link(section_name, input_section, args),
                 SectionRuleOutcome::AArch64Attribute
