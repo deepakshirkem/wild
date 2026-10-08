@@ -1042,6 +1042,14 @@ pub(crate) trait Platform:
     /// from an input file.
     fn default_symtab_entry() -> Self::SymtabEntry;
 
+    /// Override a custom section rule when the platform needs special handling.
+    fn override_custom_section_rule(
+        _section_name: &[u8],
+        _args: &Self::Args,
+    ) -> Option<crate::layout_rules::SectionRuleOutcome> {
+        None
+    }
+
     fn lookup_for_partial_link(
         _section_name: &[u8],
         _section: &Self::SectionHeader,

@@ -1593,15 +1593,8 @@ fn resolve_section<'data, P: Platform>(
                 .section_rules
                 .lookup::<P>(section_name, file_name, input_section);
 
-        if matches!(&outcome, SectionRuleOutcome::Custom)
-            && section_name
-                == linker_utils::elf::secnames::ARM_ATTRIBUTES_SECTION_NAME_STR.as_bytes()
-            && matches!(
-                P::lookup_for_partial_link(section_name, input_section, args),
-                SectionRuleOutcome::AArch64Attribute
-            )
-        {
-            SectionRuleOutcome::AArch64Attribute
+        if matches!(&outcome, SectionRuleOutcome::Custom) {
+            P::override_custom_section_rule(section_name, args).unwrap_or(outcome)
         } else {
             outcome
         }
