@@ -2915,19 +2915,6 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
         }
     }
 
-    fn override_custom_section_rule(
-        section_name: &[u8],
-        args: &Self::Args,
-    ) -> Option<SectionRuleOutcome> {
-        if args.architecture() == Architecture::AArch64
-            && section_name == secnames::ARM_ATTRIBUTES_SECTION_NAME_STR.as_bytes()
-        {
-            Some(SectionRuleOutcome::AArch64Attribute)
-        } else {
-            None
-        }
-    }
-
     fn lookup_for_partial_link(
         section_name: &[u8],
         section: &Self::SectionHeader,
@@ -7175,6 +7162,10 @@ const LINKER_MANAGED_SECTION_RULES: &[SectionRule<'static>] = &[
     SectionRule::exact(
         secnames::RISCV_ATTRIBUTES_SECTION_NAME,
         SectionRuleOutcome::RiscVAttribute,
+    ),
+    SectionRule::exact(
+        secnames::ARM_ATTRIBUTES_SECTION_NAME_STR.as_bytes(),
+        SectionRuleOutcome::AArch64Attribute,
     ),
     SectionRule::exact(
         secnames::SYMTAB_SHNDX_SECTION_NAME,

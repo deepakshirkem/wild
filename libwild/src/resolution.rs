@@ -1588,16 +1588,9 @@ fn resolve_section<'data, P: Platform>(
     let rule_outcome = if args.should_output_partial_object() {
         P::lookup_for_partial_link(section_name, input_section, args)
     } else {
-        let outcome =
-            layout_rules
-                .section_rules
-                .lookup::<P>(section_name, file_name, input_section);
-
-        if matches!(&outcome, SectionRuleOutcome::Custom) {
-            P::override_custom_section_rule(section_name, args).unwrap_or(outcome)
-        } else {
-            outcome
-        }
+        layout_rules
+            .section_rules
+            .lookup::<P>(section_name, file_name, input_section)
     };
 
     if args.orphan_handling() != OrphanHandling::Place
