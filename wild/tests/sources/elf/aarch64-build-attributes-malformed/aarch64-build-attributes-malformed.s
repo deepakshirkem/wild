@@ -1,5 +1,4 @@
-// Malformed AArch64 build attributes should produce a warning without
-// preventing the final link from succeeding.
+// Malformed AArch64 build attributes must cause the link to fail.
 //
 // The final two bytes extend beyond the declared subsection length.
 //#Arch:aarch64
@@ -7,8 +6,8 @@
 //#ReferenceLinkers:
 //#RunEnabled:false
 //#DiffEnabled:false
-//#ExpectWarningWild:Cannot parse .ARM.attributes section
-//#ExpectWarningWild:unexpected end of data at offset 0x3f
+//#ExpectErrorWild:Cannot parse .ARM.attributes section
+//#ExpectErrorWild:unexpected end of data at offset 0x3f
 
 .text
 .globl _start
