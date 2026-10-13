@@ -4598,13 +4598,15 @@ impl<'data, P: Platform<GcUnit = SectionGcUnit>> ObjectLayoutState<'data, P> {
             .context("Cannot parse .riscv.attributes section")?;
         }
 
-        if let Some(aarch64_attributes_index) = aarch64_attributes_section {
-            A::process_aarch64_build_attributes(
+        if let Some(aarch64_attributes_index) = aarch64_attributes_section
+            && let Err(error) = A::process_aarch64_build_attributes(
                 self.object,
                 &mut self.format_specific,
                 aarch64_attributes_index,
             )
-            .context("Cannot parse .ARM.attributes section")?;
+            .context("Cannot parse .ARM.attributes section")
+        {
+            resources.symbol_db.warning(error.to_string());
         }
 
         for init_function_section_index in init_func_section_indices {
