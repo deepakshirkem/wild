@@ -4646,6 +4646,55 @@ impl LayoutExt {
             merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, args.force_ibt);
 
         merge_aarch64_build_attributes(states.clone(), &mut gnu_property_notes)?;
+
+        if args.force_bti {
+            ensure!(
+                A::arch_identifier() == object::elf::EM_AARCH64,
+                "-z force-bti is only supported on AArch64"
+            );
+
+            let bti = object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI;
+            if let Some(property) = gnu_property_notes
+                .iter_mut()
+                .find(|property| property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND)
+            {
+                let Some(bits) = property.data.as_u32_mut() else {
+                    bail!("Invalid AArch64 feature GNU property");
+                };
+                *bits |= bti;
+            } else {
+                gnu_property_notes.push(GnuProperty {
+                    ptype: object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND,
+                    data: GnuPropertyData::U32(bti),
+                });
+                gnu_property_notes.sort_by_key(|property| property.ptype);
+            }
+            for obj in objects_iter(groups) {
+                let attributes_features = obj
+                    .format_specific
+                    .aarch64_build_attributes
+                    .and_then(|attributes| attributes.feature_and_bits);
+
+                let gnu_features = obj
+                    .format_specific
+                    .gnu_property_notes
+                    .iter()
+                    .filter(|property| {
+                        property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND
+                    })
+                    .filter_map(|property| property.data.as_u32())
+                    .reduce(|lhs, rhs| lhs | rhs);
+
+                let features = attributes_features.or(gnu_features).unwrap_or(0);
+                if features & object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI == 0 {
+                    let filename = obj.input.file.filename.to_string_lossy();
+                    args.warning(format!(
+                        "{filename}: -z force-bti: file does not have BTI property"
+                    ));
+                }
+            }
+        }
+
         if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
@@ -4662,6 +4711,16 @@ impl LayoutExt {
             eflags,
             has_eh_frame_input,
             num_got_plt_header_entries: A::NUM_GOT_PLT_HEADER_ENTRIES,
+        })
+    }
+
+    pub(crate) fn has_aarch64_bti(&self) -> bool {
+        self.gnu_property_notes.iter().any(|property| {
+            property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND
+                && property
+                    .data
+                    .as_u32()
+                    .is_some_and(|bits| bits & object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI != 0)
         })
     }
 

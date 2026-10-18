@@ -7287,6 +7287,7 @@ fn dynamic_tag_name(tag: object::elf::DynamicTag) -> Option<&'static str> {
         DT_PREINIT_ARRAYSZ => "DT_PREINIT_ARRAYSZ",
         DT_FLAGS_1 => "DT_FLAGS_1",
         DT_GNU_HASH => "DT_GNU_HASH",
+        DT_AARCH64_BTI_PLT => "DT_AARCH64_BTI_PLT",
         DT_RELACOUNT => "DT_RELACOUNT",
         DT_RELCOUNT => "DT_RELCOUNT",
         DT_VERSYM => "DT_VERSYM",
