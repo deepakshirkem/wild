@@ -4456,6 +4456,12 @@ fn maybe_get_thunk_for_relocation<C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
             .bitand(mask.symbol_plus_addend)
             .wrapping_sub(place.bitand(mask.place));
 
+        if !rel_info.range.contains(new_value as i64) {
+            bail!(
+                "Branch to thunk out of range: relocation at {place:#x} cannot reach thunk at {thunk_address:#x}"
+            );
+        }
+
         tracing::trace!(
             old_value = value,
             new_value,
