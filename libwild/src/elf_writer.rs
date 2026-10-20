@@ -1918,6 +1918,8 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
     for (i, sec) in object.sections.iter().enumerate() {
         let section_index = object::SectionIndex(i);
 
+        write_bti_landing_pads::<C, A>(object, buffers, layout, section_index)?;
+
         match sec {
             SectionSlot::Loaded(sec)
             | SectionSlot::PartialLinkSingleton(PartialLinkSingleton { section: sec, .. }) => {
@@ -2026,6 +2028,81 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
     Ok(())
 }
 
+/// `bti c`: a valid landing pad for indirect calls and for branches through x16/x17.
+const AARCH64_BTI_C: u32 = 0xd503_245f;
+/// `b` (unconditional immediate branch) opcode, before the 26-bit word offset is ORed in.
+const AARCH64_B: u32 = 0x1400_0000;
+/// Mask for the 26-bit word offset field of `b`.
+const AARCH64_B_IMM26_MASK: u32 = 0x03ff_ffff;
+/// Reach of `b`: +/-128 MiB.
+const AARCH64_B_RANGE: i64 = 128 * 1024 * 1024;
+
+/// Writes the BTI landing pads (`bti c; b target`) that precede `section_index` of `object`.
+///
+/// When BTI is enforced, a range-extension thunk reaches its target with an indirect `br`, so the
+/// target must start with a landing pad. Layout reserved space for one pad per such target
+/// immediately before the target's input section, and `write_thunks` branches to the pad instead
+/// of the target. This must run just before the section's own data is written so that it consumes
+/// the reserved space in the same order layout assigned addresses.
+fn write_bti_landing_pads<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
+    object: &ObjectLayout<'data, elf::Elf<C>>,
+    buffers: &mut OutputSectionPartMap<&mut [u8]>,
+    layout: &ElfLayout<'data, C>,
+    section_index: object::SectionIndex,
+) -> Result {
+    if layout.bti_pad_addresses.is_empty() || layout.args().only_keep_debug() {
+        return Ok(());
+    }
+
+    let file_id = object.file_id;
+    let Some(symbols) =
+        layout
+            .bti_candidates_by_section
+            .get(&(file_id.group(), file_id.file(), section_index.0))
+    else {
+        return Ok(());
+    };
+
+    for &symbol_id in symbols {
+        let &pad_address = layout
+            .bti_pad_addresses
+            .get(&symbol_id)
+            .with_context(|| format!("Missing BTI pad address for {symbol_id}"))?;
+
+        let resolution = layout
+            .merged_symbol_resolution(symbol_id)
+            .with_context(|| format!("Missing BTI target resolution for {symbol_id}"))?;
+
+        let target_address = resolution.raw_value;
+        // The `b` is the second instruction of the pad.
+        let branch_address = pad_address + 4;
+        let displacement = target_address.wrapping_sub(branch_address) as i64;
+
+        ensure!(
+            displacement % 4 == 0 && (-AARCH64_B_RANGE..AARCH64_B_RANGE).contains(&displacement),
+            "BTI landing pad branch from {branch_address:#x} to {target_address:#x} is out of range"
+        );
+
+        let branch = AARCH64_B | (((displacement / 4) as u32) & AARCH64_B_IMM26_MASK);
+
+        let part_id = layout.symbol_db.part_id_for_symbol(symbol_id);
+        let allocation_size =
+            crate::layout::bti_pad_size(part_id, &layout.output_sections) as usize;
+
+        let buf = buffers
+            .get_mut(part_id)
+            .split_off_mut(..allocation_size)
+            .ok_or_else(|| crate::file_writer::insufficient_allocation("BTI landing pad"))?;
+
+        // Any alignment padding after the two instructions is zero (`udf`) and never executed.
+        buf.fill(0);
+        buf[..4].copy_from_slice(&AARCH64_BTI_C.to_le_bytes());
+        buf[4..8].copy_from_slice(&branch.to_le_bytes());
+    }
+
+    Ok(())
+}
+
 /// Write thunk instructions for a set of (SymbolId -> thunk_address) mappings.
 ///
 /// Thunks are sorted by SymbolId for determinism and written consecutively into the primary
@@ -2063,7 +2140,13 @@ fn write_thunks<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                 )
             })?;
 
-        let target_address = res.plt_address().unwrap_or(res.raw_value);
+        // When BTI is enforced, the thunk's indirect branch must land on a `bti` instruction, so
+        // branch to the target's landing pad if it has one.
+        let target_address = layout
+            .bti_pad_addresses
+            .get(symbol_id)
+            .copied()
+            .unwrap_or_else(|| res.plt_address().unwrap_or(res.raw_value));
 
         if !layout.args().only_keep_debug() {
             let buf = buffers.get_mut(primary_part_id);

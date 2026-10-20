@@ -779,6 +779,10 @@ pub(crate) trait Platform:
     fn built_in_section_infos<'data>()
     -> Vec<crate::output_section_id::SectionOutputInfo<'data, Self>>;
 
+    fn output_bti_enabled<'data>(_ext: &Self::FinaliseSizesExt<'data>) -> bool {
+        false
+    }
+
     fn create_finalise_sizes_ext<'data, 'states, 'files, A: Arch<Platform = Self>>(
         args: &Self::Args,
         groups: &'files mut [layout::GroupState<'data, Self>],
