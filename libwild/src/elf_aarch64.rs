@@ -46,6 +46,15 @@ const THUNK_TEMPLATE: &[u8] = &[
 /// The shortest range-limited branch for this arch.
 pub(crate) const MIN_BRANCH_RANGE: u64 = 128 * 1024 * 1024;
 
+/// `bti c`: a valid landing pad for indirect calls and for branches through x16/x17.
+pub(crate) const BTI_C: u32 = 0xd503_245f;
+/// `bti jc`: a valid landing pad for both indirect calls and indirect jumps.
+pub(crate) const BTI_JC: u32 = 0xd503_24df;
+/// `paciasp`: implicitly a landing pad for indirect calls and branches through x16/x17.
+pub(crate) const PACIASP: u32 = 0xd503_233f;
+/// `pacibsp`: implicitly a landing pad for indirect calls and branches through x16/x17.
+pub(crate) const PACIBSP: u32 = 0xd503_237f;
+
 const _ASSERTS: () = {
     assert!(PLT_ENTRY_TEMPLATE.len() as u64 == PLT_ENTRY_SIZE);
 };
@@ -179,7 +188,7 @@ impl crate::platform::Arch for ElfAArch64 {
 
         // Replace ADRP/LDR/BR/NOP with BTI/ADRP/LDR/BR.
         plt_entry.copy_within(0..12, 4);
-        plt_entry[..4].copy_from_slice(&[0x5f, 0x24, 0x03, 0xd5]);
+        plt_entry[..4].copy_from_slice(&BTI_C.to_le_bytes());
 
         Ok(())
     }
@@ -477,6 +486,10 @@ impl crate::platform::Arch for ElfAArch64 {
             min_branch_range: MIN_BRANCH_RANGE,
             thunk_size: THUNK_TEMPLATE.len() as u64,
         })
+    }
+
+    fn is_bti_landing_pad(insn: u32) -> bool {
+        matches!(insn, BTI_C | BTI_JC | PACIASP | PACIBSP)
     }
 
     fn write_thunk(thunk_address: u64, target_address: u64, buf: &mut [u8]) {

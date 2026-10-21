@@ -309,6 +309,12 @@ pub(crate) trait Arch: Send + Sync + 'static {
         None
     }
 
+    /// Whether `insn` already acts as a BTI landing pad, so that a range-extension thunk can
+    /// branch to it directly without an extra pad.
+    fn is_bti_landing_pad(_insn: u32) -> bool {
+        false
+    }
+
     /// Writes a thunk into the supplied buffer that jumps to the given target address. The thunk is
     /// placed at `thunk_address`. The buffer size equals `ThunkConfig::thunk_size`. The thunk must
     /// be position-independent (PC-relative).

@@ -283,7 +283,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
     // When BTI is enforced, thunks reach their target through an indirect `br`, so each thunk
     // target needs a landing pad unless it already starts with one. Group targets by the input
     // section that contains them; each pad is placed immediately before that section.
-    let mut bti_candidates_by_section: BTreeMap<BtiPadSection, Vec<SymbolId>> = BTreeMap::new();
+    let mut bti_candidates_by_section: HashMap<BtiPadSection, Vec<SymbolId>> = HashMap::new();
 
     if output_bti_enabled {
         let targets: std::collections::BTreeSet<SymbolId> = thunk_blocks
@@ -337,7 +337,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
             let section_data = obj.object.raw_section_data(section)?;
             let start = symbol_offset as usize;
             if let Some(insn) = section_data.get(start..start + 4)
-                && is_bti_landing_pad(u32::from_le_bytes(insn.try_into().unwrap()))
+                && A::is_bti_landing_pad(u32::from_le_bytes(insn.try_into().unwrap()))
             {
                 continue;
             }
@@ -511,7 +511,7 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         .take(thunk_blocks.len())
         .collect();
 
-    let bti_pad_addresses_out = Mutex::new(BTreeMap::<SymbolId, u64>::new());
+    let bti_pad_addresses_out = Mutex::new(HashMap::<SymbolId, u64>::new());
 
     let resources = FinaliseLayoutResources {
         symbol_db: &symbol_db,
@@ -952,9 +952,9 @@ pub struct Layout<'data, P: Platform> {
     /// of the thunk for that symbol within the block.
     pub(crate) thunk_block_addresses: Vec<BTreeMap<SymbolId, u64>>,
     /// Address of the BTI landing pad for each thunk target that needs one.
-    pub(crate) bti_pad_addresses: BTreeMap<SymbolId, u64>,
+    pub(crate) bti_pad_addresses: HashMap<SymbolId, u64>,
     /// Thunk targets that need a BTI landing pad, grouped by the input section the pad precedes.
-    pub(crate) bti_candidates_by_section: BTreeMap<BtiPadSection, Vec<SymbolId>>,
+    pub(crate) bti_candidates_by_section: HashMap<BtiPadSection, Vec<SymbolId>>,
 
     pub(crate) compressed_debug_sections: OutputSectionMap<Option<CompressedSection>>,
     pub(crate) gdb_index_data: Option<P::GdbIndexScanResult<'data>>,
@@ -1864,8 +1864,8 @@ pub(crate) struct FinaliseLayoutResources<'scope, 'data, P: Platform> {
     /// put it here and wrap each map in a mutex. Since each map is only written by its owner, each
     /// mutex should only ever get locked once during its lifetime.
     pub(crate) thunk_block_addresses: &'scope Vec<Mutex<BTreeMap<SymbolId, u64>>>,
-    pub(crate) bti_candidates_by_section: &'scope BTreeMap<BtiPadSection, Vec<SymbolId>>,
-    pub(crate) bti_pad_addresses: &'scope Mutex<BTreeMap<SymbolId, u64>>,
+    pub(crate) bti_candidates_by_section: &'scope HashMap<BtiPadSection, Vec<SymbolId>>,
+    pub(crate) bti_pad_addresses: &'scope Mutex<HashMap<SymbolId, u64>>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -7293,12 +7293,6 @@ pub(crate) fn bti_pad_size<P: Platform>(
     output_sections: &OutputSections<P>,
 ) -> u64 {
     part_id.alignment(output_sections).align_up(8)
-}
-
-/// Whether `insn` is a valid target for an indirect branch through x16/x17 when BTI is enabled:
-/// `bti c`, `bti jc`, `paciasp` or `pacibsp`.
-fn is_bti_landing_pad(insn: u32) -> bool {
-    matches!(insn, 0xd503_245f | 0xd503_24df | 0xd503_233f | 0xd503_237f)
 }
 
 fn harvest_and_sort_script_sections<'data, P: Platform>(

@@ -101,6 +101,7 @@ use crate::writable_elf::WritableRelr as _;
 use crate::writable_elf::WritableSectionHeader as _;
 use crate::writable_elf::WritableSymbol as _;
 use hashbrown::HashMap;
+use linker_utils::elf::AllowedRange;
 use linker_utils::elf::Bias;
 use linker_utils::elf::DynamicRelocationKind;
 use linker_utils::elf::RISCV_ATTRIBUTE_VENDOR_NAME;
@@ -109,6 +110,7 @@ use linker_utils::elf::RelocationKind;
 use linker_utils::elf::RelocationKindInfo;
 use linker_utils::elf::RelocationSize;
 use linker_utils::elf::SectionFlags;
+use linker_utils::elf::Sign;
 use linker_utils::elf::pf;
 use linker_utils::elf::riscvattr::TAG_RISCV_ARCH;
 use linker_utils::elf::riscvattr::TAG_RISCV_PRIV_SPEC;
@@ -2028,15 +2030,6 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
     Ok(())
 }
 
-/// `bti c`: a valid landing pad for indirect calls and for branches through x16/x17.
-const AARCH64_BTI_C: u32 = 0xd503_245f;
-/// `b` (unconditional immediate branch) opcode, before the 26-bit word offset is ORed in.
-const AARCH64_B: u32 = 0x1400_0000;
-/// Mask for the 26-bit word offset field of `b`.
-const AARCH64_B_IMM26_MASK: u32 = 0x03ff_ffff;
-/// Reach of `b`: +/-128 MiB.
-const AARCH64_B_RANGE: i64 = 128 * 1024 * 1024;
-
 /// Writes the BTI landing pads (`bti c; b target`) that precede `section_index` of `object`.
 ///
 /// When BTI is enforced, a range-extension thunk reaches its target with an indirect `br`, so the
@@ -2076,14 +2069,15 @@ fn write_bti_landing_pads<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
         let target_address = resolution.raw_value;
         // The `b` is the second instruction of the pad.
         let branch_address = pad_address + 4;
-        let displacement = target_address.wrapping_sub(branch_address) as i64;
+        let displacement = target_address.wrapping_sub(branch_address);
 
         ensure!(
-            displacement % 4 == 0 && (-AARCH64_B_RANGE..AARCH64_B_RANGE).contains(&displacement),
+            displacement.is_multiple_of(4)
+                && AllowedRange::from_bit_size(28, Sign::Signed).contains(displacement as i64),
             "BTI landing pad branch from {branch_address:#x} to {target_address:#x} is out of range"
         );
 
-        let branch = AARCH64_B | (((displacement / 4) as u32) & AARCH64_B_IMM26_MASK);
+        let branch = crate::erratum843419::encode_branch(branch_address, target_address)?;
 
         let part_id = layout.symbol_db.part_id_for_symbol(symbol_id);
         let allocation_size =
@@ -2096,7 +2090,7 @@ fn write_bti_landing_pads<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
 
         // Any alignment padding after the two instructions is zero (`udf`) and never executed.
         buf.fill(0);
-        buf[..4].copy_from_slice(&AARCH64_BTI_C.to_le_bytes());
+        buf[..4].copy_from_slice(&crate::elf_aarch64::BTI_C.to_le_bytes());
         buf[4..8].copy_from_slice(&branch.to_le_bytes());
     }
 
