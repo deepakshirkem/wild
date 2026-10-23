@@ -1573,10 +1573,6 @@ impl<C: ElfClass> platform::Platform for Elf<C> {
             .collect()
     }
 
-    fn output_bti_enabled<'data>(ext: &Self::FinaliseSizesExt<'data>) -> bool {
-        ext.output_bti_enabled
-    }
-
     fn create_finalise_sizes_ext<'data, 'states, 'files, A: Arch<Platform = Self>>(
         args: &ElfArgs,
         groups: &'files mut [layout::GroupState<'data, Self>],
@@ -4723,7 +4719,6 @@ pub(crate) struct ObjectLayoutStateExt<'data, C: ElfClass> {
 #[derive(Debug)]
 pub(crate) struct LayoutExt {
     pub(crate) gnu_property_notes: Vec<GnuProperty>,
-    pub(crate) output_bti_enabled: bool,
     pub(crate) riscv_attributes: RiscVAttributes,
     pub(crate) eflags: object::elf::FileFlags,
     has_eh_frame_input: bool,
@@ -4751,15 +4746,6 @@ impl LayoutExt {
             apply_force_bti::<C, A>(groups, args, &mut gnu_property_notes)?;
         }
 
-        let output_bti_enabled = gnu_property_notes.iter().any(|property| {
-            property.ptype == object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_AND
-                && property.data.as_u32().is_some_and(|features| {
-                    features & object::elf::GNU_PROPERTY_AARCH64_FEATURE_1_BTI != 0
-                })
-        });
-
-        tracing::debug!(output_bti_enabled, "Final output BTI state");
-
         if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
@@ -4772,7 +4758,6 @@ impl LayoutExt {
 
         Ok(Self {
             gnu_property_notes,
-            output_bti_enabled,
             riscv_attributes,
             eflags,
             has_eh_frame_input,

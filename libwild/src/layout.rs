@@ -268,8 +268,6 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         .and_then(A::Platform::single_part_id)
         .map_or(0, |part_id| section_part_sizes.get(part_id) / 8);
 
-    let output_bti_enabled = A::Platform::output_bti_enabled(&finalise_sizes_ext);
-
     let thunk_blocks = thunk_layout_builder.map_or_default(|builder| {
         builder.build(
             &mut group_states,
@@ -280,83 +278,6 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         )
     });
 
-    // When BTI is enforced, thunks reach their target through an indirect `br`, so each thunk
-    // target needs a landing pad unless it already starts with one. Group targets by the input
-    // section that contains them; each pad is placed immediately before that section.
-    let mut bti_candidates_by_section: HashMap<BtiPadSection, Vec<SymbolId>> = HashMap::new();
-
-    if output_bti_enabled {
-        let targets: std::collections::BTreeSet<SymbolId> = thunk_blocks
-            .iter()
-            .flat_map(|block| block.symbols.iter().copied())
-            .collect();
-
-        for symbol_id in targets {
-            if per_symbol_flags
-                .flags_for_symbol(symbol_id)
-                .intersects(ValueFlags::IFUNC | ValueFlags::DYNAMIC | ValueFlags::PLT)
-            {
-                continue;
-            }
-
-            let file_id = symbol_db.file_id_for_symbol(symbol_id);
-            let Some(FileLayoutState::Object(obj)) =
-                group_states[file_id.group()].files.get(file_id.file())
-            else {
-                continue;
-            };
-
-            let symbol_index = obj.symbol_id_range().id_to_input(symbol_id);
-            let symbol = obj.object.symbol(symbol_index)?;
-
-            let Some(section_index) = obj.object.symbol_section(symbol, symbol_index)? else {
-                continue;
-            };
-
-            // Only generate pads for loaded executable sections.
-            if !matches!(
-                obj.sections.get(section_index.0),
-                Some(SectionSlot::Loaded(_))
-            ) {
-                continue;
-            }
-
-            let part_id = symbol_db.part_id_for_symbol(symbol_id);
-            if !output_sections
-                .output_info(part_id.output_section_id::<A::Platform>())
-                .section_attributes
-                .is_executable()
-            {
-                continue;
-            }
-
-            let section = obj.object.section(section_index)?;
-            let symbol_offset = obj.object.symbol_offset_in_section(symbol, section_index)?;
-
-            // Targets that already begin with a valid landing pad don't need one.
-            let section_data = obj.object.raw_section_data(section)?;
-            let start = symbol_offset as usize;
-            if let Some(insn) = section_data.get(start..start + 4)
-                && A::is_bti_landing_pad(u32::from_le_bytes(insn.try_into().unwrap()))
-            {
-                continue;
-            }
-
-            bti_candidates_by_section
-                .entry((file_id.group(), file_id.file(), section_index.0))
-                .or_default()
-                .push(symbol_id);
-        }
-
-        tracing::debug!(
-            count = bti_candidates_by_section
-                .values()
-                .map(Vec::len)
-                .sum::<usize>(),
-            "BTI landing pads"
-        );
-    }
-
     allocate_thunk_block_space::<A::Platform>(
         &mut group_states,
         &thunk_blocks,
@@ -364,19 +285,15 @@ pub fn compute<'data, P: Platform, A: Arch<Platform = P>, F: FileSystem>(
         &symbol_db,
     );
 
-    // Reserve space for each BTI landing pad in the group that owns its target.
-    for ((group_index, _file_index, _section_index), symbols) in &bti_candidates_by_section {
-        for &symbol_id in symbols {
-            let part_id = symbol_db.part_id_for_symbol(symbol_id);
-            let size = bti_pad_size(part_id, &output_sections);
-
-            group_states[*group_index]
-                .common
-                .mem_sizes
-                .increment(part_id, size);
-            section_part_sizes.increment(part_id, size);
-        }
-    }
+    let bti_candidates_by_section = A::allocate_thunk_landing_pads(
+        &thunk_blocks,
+        &mut group_states,
+        &mut section_part_sizes,
+        &symbol_db,
+        &per_symbol_flags,
+        &output_sections,
+        &finalise_sizes_ext,
+    )?;
 
     let mut memory_regions = HashMap::new();
     for s in &linker_scripts {
@@ -2610,6 +2527,121 @@ fn compute_total_section_part_sizes<'data, P: Platform>(
 }
 
 /// Allocates space for thunk blocks in each object that owns one.
+/// Returns the thunk targets that need a landing pad, grouped by the input section that each pad is
+/// placed immediately before. `already_a_landing_pad` is given the bytes at a target and says
+/// whether the target can be branched to directly by a thunk without a pad.
+pub(crate) fn collect_thunk_landing_pad_targets<P: Platform>(
+    thunk_blocks: &[crate::thunks::ThunkBlock],
+    group_states: &[GroupState<P>],
+    symbol_db: &SymbolDb<P>,
+    per_symbol_flags: &crate::value_flags::PerSymbolFlags,
+    output_sections: &OutputSections<P>,
+    already_a_landing_pad: impl Fn(&[u8]) -> bool,
+) -> Result<HashMap<BtiPadSection, Vec<SymbolId>>> {
+    let mut bti_candidates_by_section: HashMap<BtiPadSection, Vec<SymbolId>> = HashMap::new();
+
+    let targets: std::collections::BTreeSet<SymbolId> = thunk_blocks
+        .iter()
+        .flat_map(|block| block.symbols.iter().copied())
+        .collect();
+
+    for symbol_id in targets {
+        if per_symbol_flags
+            .flags_for_symbol(symbol_id)
+            .intersects(ValueFlags::IFUNC | ValueFlags::DYNAMIC | ValueFlags::PLT)
+        {
+            continue;
+        }
+
+        let file_id = symbol_db.file_id_for_symbol(symbol_id);
+        let Some(FileLayoutState::Object(obj)) =
+            group_states[file_id.group()].files.get(file_id.file())
+        else {
+            continue;
+        };
+
+        let symbol_index = obj.symbol_id_range().id_to_input(symbol_id);
+        let symbol = obj.object.symbol(symbol_index)?;
+
+        let Some(section_index) = obj.object.symbol_section(symbol, symbol_index)? else {
+            continue;
+        };
+
+        // Pads are placed while laying out each object's sections. Linker-script-sorted sections
+        // are laid out in a separate pass, so pads aren't supported for targets in them.
+        let in_sorted_section = match obj.sections.get(section_index.0) {
+            Some(SectionSlot::Loaded(_)) => false,
+            Some(SectionSlot::Sorted(_)) => true,
+            _ => continue,
+        };
+
+        let part_id = symbol_db.part_id_for_symbol(symbol_id);
+        if !output_sections
+            .output_info(part_id.output_section_id::<P>())
+            .section_attributes
+            .is_executable()
+        {
+            continue;
+        }
+
+        let section = obj.object.section(section_index)?;
+        let symbol_offset = obj.object.symbol_offset_in_section(symbol, section_index)?;
+
+        // Targets that already begin with a valid landing pad don't need one.
+        let section_data = obj.object.raw_section_data(section)?;
+        if section_data
+            .get(symbol_offset as usize..)
+            .is_some_and(&already_a_landing_pad)
+        {
+            continue;
+        }
+
+        ensure!(
+            !in_sorted_section,
+            "Thunk target `{}` needs a landing pad, but is in a linker-script-sorted section, \
+             which is not supported",
+            symbol_db.symbol_name_for_display(symbol_id)
+        );
+
+        bti_candidates_by_section
+            .entry((file_id.group(), file_id.file(), section_index.0))
+            .or_default()
+            .push(symbol_id);
+    }
+
+    tracing::debug!(
+        count = bti_candidates_by_section
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        "BTI landing pads"
+    );
+
+    Ok(bti_candidates_by_section)
+}
+
+/// Reserves space for each thunk landing pad in the group that owns its target.
+pub(crate) fn reserve_thunk_landing_pad_space<P: Platform>(
+    bti_candidates_by_section: &HashMap<BtiPadSection, Vec<SymbolId>>,
+    group_states: &mut [GroupState<P>],
+    total_sizes: &mut OutputSectionPartMap<u64>,
+    symbol_db: &SymbolDb<P>,
+    output_sections: &OutputSections<P>,
+) {
+    for (&(group_index, _file_index, _section_index), symbols) in bti_candidates_by_section {
+        for &symbol_id in symbols {
+            let part_id = symbol_db.part_id_for_symbol(symbol_id);
+            let size = bti_pad_size(part_id, output_sections);
+
+            group_states[group_index]
+                .common
+                .mem_sizes
+                .increment(part_id, size);
+            total_sizes.increment(part_id, size);
+        }
+    }
+}
+
 fn allocate_thunk_block_space<P: Platform>(
     group_states: &mut [GroupState<P>],
     thunk_blocks: &[crate::thunks::ThunkBlock],

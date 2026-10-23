@@ -309,12 +309,6 @@ pub(crate) trait Arch: Send + Sync + 'static {
         None
     }
 
-    /// Whether `insn` already acts as a BTI landing pad, so that a range-extension thunk can
-    /// branch to it directly without an extra pad.
-    fn is_bti_landing_pad(_insn: u32) -> bool {
-        false
-    }
-
     /// Writes a thunk into the supplied buffer that jumps to the given target address. The thunk is
     /// placed at `thunk_address`. The buffer size equals `ThunkConfig::thunk_size`. The thunk must
     /// be position-independent (PC-relative).
@@ -322,6 +316,34 @@ pub(crate) trait Arch: Send + Sync + 'static {
         // Should only be called if thunk_config returns Some, in which case this must be
         // overridden.
         unimplemented!();
+    }
+
+    /// Writes the landing pads needed by thunk targets in `section_index` of `object`. Layout
+    /// reserves the space for them immediately before that section and `write_thunks` branches to
+    /// the pads instead of the targets. Must be called just before the section's own data is
+    /// written, so that the reserved space is consumed in the order layout assigned addresses.
+    fn write_thunk_landing_pads<'data>(
+        _object: &layout::ObjectLayout<'data, Self::Platform>,
+        _buffers: &mut OutputSectionPartMap<&mut [u8]>,
+        _layout: &Layout<'data, Self::Platform>,
+        _section_index: object::SectionIndex,
+    ) -> Result {
+        Ok(())
+    }
+
+    /// Decides which thunk targets need a landing pad and reserves space for the pads. Called after
+    /// thunk blocks have been allocated. Returns the targets grouped by the input section each pad
+    /// is placed immediately before; the default is no landing pads.
+    fn allocate_thunk_landing_pads<'data>(
+        _thunk_blocks: &[crate::thunks::ThunkBlock],
+        _group_states: &mut [layout::GroupState<Self::Platform>],
+        _total_sizes: &mut OutputSectionPartMap<u64>,
+        _symbol_db: &SymbolDb<Self::Platform>,
+        _per_symbol_flags: &PerSymbolFlags,
+        _output_sections: &OutputSections<Self::Platform>,
+        _format_specific: &<Self::Platform as Platform>::FinaliseSizesExt<'data>,
+    ) -> Result<hashbrown::HashMap<layout::BtiPadSection, Vec<SymbolId>>> {
+        Ok(hashbrown::HashMap::new())
     }
 
     /// Return the starting load address for non-PIE output.
@@ -784,10 +806,6 @@ pub(crate) trait Platform:
 
     fn built_in_section_infos<'data>()
     -> Vec<crate::output_section_id::SectionOutputInfo<'data, Self>>;
-
-    fn output_bti_enabled<'data>(_ext: &Self::FinaliseSizesExt<'data>) -> bool {
-        false
-    }
 
     fn create_finalise_sizes_ext<'data, 'states, 'files, A: Arch<Platform = Self>>(
         args: &Self::Args,

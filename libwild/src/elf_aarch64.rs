@@ -55,6 +55,17 @@ pub(crate) const PACIASP: u32 = 0xd503_233f;
 /// `pacibsp`: implicitly a landing pad for indirect calls and branches through x16/x17.
 pub(crate) const PACIBSP: u32 = 0xd503_237f;
 
+/// Whether the instruction at the start of `bytes` is a valid target for an indirect branch through
+/// x16/x17 when BTI is enabled.
+fn is_bti_landing_pad(bytes: &[u8]) -> bool {
+    bytes.first_chunk::<4>().is_some_and(|insn| {
+        matches!(
+            u32::from_le_bytes(*insn),
+            BTI_C | BTI_JC | PACIASP | PACIBSP
+        )
+    })
+}
+
 const _ASSERTS: () = {
     assert!(PLT_ENTRY_TEMPLATE.len() as u64 == PLT_ENTRY_SIZE);
 };
@@ -488,10 +499,6 @@ impl crate::platform::Arch for ElfAArch64 {
         })
     }
 
-    fn is_bti_landing_pad(insn: u32) -> bool {
-        matches!(insn, BTI_C | BTI_JC | PACIASP | PACIBSP)
-    }
-
     fn write_thunk(thunk_address: u64, target_address: u64, buf: &mut [u8]) {
         // Use ADRP+ADD+BR - a PC-relative thunk that works in PIE binaries.
         buf.copy_from_slice(THUNK_TEMPLATE);
@@ -507,6 +514,102 @@ impl crate::platform::Arch for ElfAArch64 {
             false,
             &mut buf[4..8],
         );
+    }
+
+    /// When BTI is enforced, a thunk reaches its target with an indirect `br`, so targets that
+    /// don't already start with a landing pad get `bti c; b target` written just before them.
+    fn write_thunk_landing_pads<'data>(
+        object: &crate::layout::ObjectLayout<'data, Elf64>,
+        buffers: &mut crate::output_section_part_map::OutputSectionPartMap<&mut [u8]>,
+        layout: &Layout<'data, Elf64>,
+        section_index: object::SectionIndex,
+    ) -> Result {
+        if layout.bti_pad_addresses.is_empty() || layout.args().only_keep_debug() {
+            return Ok(());
+        }
+
+        let file_id = object.file_id;
+        let Some(symbols) = layout.bti_candidates_by_section.get(&(
+            file_id.group(),
+            file_id.file(),
+            section_index.0,
+        )) else {
+            return Ok(());
+        };
+
+        for &symbol_id in symbols {
+            let &pad_address = layout
+                .bti_pad_addresses
+                .get(&symbol_id)
+                .with_context(|| format!("Missing BTI pad address for {symbol_id}"))?;
+
+            let resolution = layout
+                .merged_symbol_resolution(symbol_id)
+                .with_context(|| format!("Missing BTI target resolution for {symbol_id}"))?;
+
+            let target_address = resolution.raw_value;
+            // The `b` is the second instruction of the pad.
+            let branch_address = pad_address + 4;
+            let displacement = target_address.wrapping_sub(branch_address);
+
+            ensure!(
+                displacement.is_multiple_of(4)
+                    && AllowedRange::from_bit_size(28, Sign::Signed).contains(displacement as i64),
+                "BTI landing pad branch from {branch_address:#x} to {target_address:#x} is out of range"
+            );
+
+            let branch = crate::erratum843419::encode_branch(branch_address, target_address)?;
+
+            let part_id = layout.symbol_db.part_id_for_symbol(symbol_id);
+            let allocation_size =
+                crate::layout::bti_pad_size(part_id, &layout.output_sections) as usize;
+
+            let buf = buffers
+                .get_mut(part_id)
+                .split_off_mut(..allocation_size)
+                .ok_or_else(|| crate::file_writer::insufficient_allocation("BTI landing pad"))?;
+
+            // Any alignment padding after the two instructions is zero (`udf`) and never executed.
+            buf.fill(0);
+            buf[..4].copy_from_slice(&BTI_C.to_le_bytes());
+            buf[4..8].copy_from_slice(&branch.to_le_bytes());
+        }
+
+        Ok(())
+    }
+
+    /// When BTI is enforced, a thunk reaches its target with an indirect `br`, so every thunk
+    /// target that doesn't already start with a landing pad gets one.
+    fn allocate_thunk_landing_pads<'data>(
+        thunk_blocks: &[crate::thunks::ThunkBlock],
+        group_states: &mut [crate::layout::GroupState<Elf64>],
+        total_sizes: &mut crate::output_section_part_map::OutputSectionPartMap<u64>,
+        symbol_db: &crate::symbol_db::SymbolDb<Elf64>,
+        per_symbol_flags: &crate::value_flags::PerSymbolFlags,
+        output_sections: &crate::output_section_id::OutputSections<Elf64>,
+        format_specific: &<Elf64 as Platform>::FinaliseSizesExt<'data>,
+    ) -> Result<hashbrown::HashMap<crate::layout::BtiPadSection, Vec<crate::symbol_db::SymbolId>>>
+    {
+        if !format_specific.has_aarch64_bti() {
+            return Ok(hashbrown::HashMap::new());
+        }
+
+        let pads = crate::layout::collect_thunk_landing_pad_targets(
+            thunk_blocks,
+            group_states,
+            symbol_db,
+            per_symbol_flags,
+            output_sections,
+            is_bti_landing_pad,
+        )?;
+        crate::layout::reserve_thunk_landing_pad_space(
+            &pads,
+            group_states,
+            total_sizes,
+            symbol_db,
+            output_sections,
+        );
+        Ok(pads)
     }
 }
 

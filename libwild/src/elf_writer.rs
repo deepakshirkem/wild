@@ -101,7 +101,6 @@ use crate::writable_elf::WritableRelr as _;
 use crate::writable_elf::WritableSectionHeader as _;
 use crate::writable_elf::WritableSymbol as _;
 use hashbrown::HashMap;
-use linker_utils::elf::AllowedRange;
 use linker_utils::elf::Bias;
 use linker_utils::elf::DynamicRelocationKind;
 use linker_utils::elf::RISCV_ATTRIBUTE_VENDOR_NAME;
@@ -110,7 +109,6 @@ use linker_utils::elf::RelocationKind;
 use linker_utils::elf::RelocationKindInfo;
 use linker_utils::elf::RelocationSize;
 use linker_utils::elf::SectionFlags;
-use linker_utils::elf::Sign;
 use linker_utils::elf::pf;
 use linker_utils::elf::riscvattr::TAG_RISCV_ARCH;
 use linker_utils::elf::riscvattr::TAG_RISCV_PRIV_SPEC;
@@ -1920,7 +1918,7 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
     for (i, sec) in object.sections.iter().enumerate() {
         let section_index = object::SectionIndex(i);
 
-        write_bti_landing_pads::<C, A>(object, buffers, layout, section_index)?;
+        A::write_thunk_landing_pads(object, buffers, layout, section_index)?;
 
         match sec {
             SectionSlot::Loaded(sec)
@@ -2025,73 +2023,6 @@ fn write_object<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
             layout,
             &mut table_writer.debug_symbol_writer,
         )?;
-    }
-
-    Ok(())
-}
-
-/// Writes the BTI landing pads (`bti c; b target`) that precede `section_index` of `object`.
-///
-/// When BTI is enforced, a range-extension thunk reaches its target with an indirect `br`, so the
-/// target must start with a landing pad. Layout reserved space for one pad per such target
-/// immediately before the target's input section, and `write_thunks` branches to the pad instead
-/// of the target. This must run just before the section's own data is written so that it consumes
-/// the reserved space in the same order layout assigned addresses.
-fn write_bti_landing_pads<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
-    object: &ObjectLayout<'data, elf::Elf<C>>,
-    buffers: &mut OutputSectionPartMap<&mut [u8]>,
-    layout: &ElfLayout<'data, C>,
-    section_index: object::SectionIndex,
-) -> Result {
-    if layout.bti_pad_addresses.is_empty() || layout.args().only_keep_debug() {
-        return Ok(());
-    }
-
-    let file_id = object.file_id;
-    let Some(symbols) =
-        layout
-            .bti_candidates_by_section
-            .get(&(file_id.group(), file_id.file(), section_index.0))
-    else {
-        return Ok(());
-    };
-
-    for &symbol_id in symbols {
-        let &pad_address = layout
-            .bti_pad_addresses
-            .get(&symbol_id)
-            .with_context(|| format!("Missing BTI pad address for {symbol_id}"))?;
-
-        let resolution = layout
-            .merged_symbol_resolution(symbol_id)
-            .with_context(|| format!("Missing BTI target resolution for {symbol_id}"))?;
-
-        let target_address = resolution.raw_value;
-        // The `b` is the second instruction of the pad.
-        let branch_address = pad_address + 4;
-        let displacement = target_address.wrapping_sub(branch_address);
-
-        ensure!(
-            displacement.is_multiple_of(4)
-                && AllowedRange::from_bit_size(28, Sign::Signed).contains(displacement as i64),
-            "BTI landing pad branch from {branch_address:#x} to {target_address:#x} is out of range"
-        );
-
-        let branch = crate::erratum843419::encode_branch(branch_address, target_address)?;
-
-        let part_id = layout.symbol_db.part_id_for_symbol(symbol_id);
-        let allocation_size =
-            crate::layout::bti_pad_size(part_id, &layout.output_sections) as usize;
-
-        let buf = buffers
-            .get_mut(part_id)
-            .split_off_mut(..allocation_size)
-            .ok_or_else(|| crate::file_writer::insufficient_allocation("BTI landing pad"))?;
-
-        // Any alignment padding after the two instructions is zero (`udf`) and never executed.
-        buf.fill(0);
-        buf[..4].copy_from_slice(&crate::elf_aarch64::BTI_C.to_le_bytes());
-        buf[4..8].copy_from_slice(&branch.to_le_bytes());
     }
 
     Ok(())
