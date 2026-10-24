@@ -342,8 +342,8 @@ pub(crate) trait Arch: Send + Sync + 'static {
         _per_symbol_flags: &PerSymbolFlags,
         _output_sections: &OutputSections<Self::Platform>,
         _format_specific: &<Self::Platform as Platform>::FinaliseSizesExt<'data>,
-    ) -> Result<hashbrown::HashMap<layout::BtiPadSection, Vec<SymbolId>>> {
-        Ok(hashbrown::HashMap::new())
+    ) -> Result<crate::thunks::LandingPadPlan> {
+        Ok(crate::thunks::LandingPadPlan::default())
     }
 
     /// Return the starting load address for non-PIE output.

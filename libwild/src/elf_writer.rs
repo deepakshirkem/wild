@@ -2065,10 +2065,10 @@ fn write_thunks<'data, C: ElfClass, A: Arch<Platform = elf::Elf<C>>>(
                 )
             })?;
 
-        // When BTI is enforced, the thunk's indirect branch must land on a `bti` instruction, so
-        // branch to the target's landing pad if it has one.
+        // If the architecture gave the target a landing pad (e.g. a `bti c` on AArch64 when BTI is
+        // enforced), the thunk branches to the pad instead of directly to the target.
         let target_address = layout
-            .bti_pad_addresses
+            .thunk_landing_pad_addresses
             .get(symbol_id)
             .copied()
             .unwrap_or_else(|| res.plt_address().unwrap_or(res.raw_value));
