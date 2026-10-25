@@ -15,6 +15,11 @@
 //#Config:ibtplt:default
 //#LinkArgs:-z ibtplt
 
+# -z ibt suppresses the missing-IBT part of -z cet-report, so the first error is about SHSTK.
+//#Config:ibt-cet-report:default
+//#LinkArgs:-z cet-report=error -z ibt
+//#ExpectErrorWild:.*: -z cet-report: file does not have GNU_PROPERTY_X86_FEATURE_1_SHSTK property
+
 .globl _start
 _start:
   ret

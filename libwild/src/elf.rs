@@ -4752,8 +4752,12 @@ impl LayoutExt {
         args: &ElfArgs,
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
-        // `-z ibt` and `-z force-ibt` are x86 options; the IBT property means nothing elsewhere.
-        let add_ibt = (args.force_ibt || args.z_ibt) && args.architecture() == Architecture::X86_64;
+        // The CET options only apply to x86-64. Like bfd, say they're ignored elsewhere.
+        let is_x86_64 = args.architecture() == Architecture::X86_64;
+        if !is_x86_64 {
+            warn_ignored_x86_cet_options(args);
+        }
+        let add_ibt = (args.force_ibt || args.z_ibt) && is_x86_64;
         let mut gnu_property_notes =
             merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, add_ibt);
 
@@ -4763,7 +4767,7 @@ impl LayoutExt {
             apply_force_bti::<C, A>(groups, args, &mut gnu_property_notes)?;
         }
 
-        if args.force_ibt || args.cet_report != crate::args::elf::CetReport::None {
+        if is_x86_64 && (args.force_ibt || args.cet_report != crate::args::elf::CetReport::None) {
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
                 check_cet_properties(&filename, &obj.format_specific.gnu_property_notes, args)?;
@@ -4840,6 +4844,23 @@ fn apply_force_bti<'files, 'data: 'files, C: ElfClass, A: Arch<Platform = Elf<C>
     Ok(())
 }
 
+/// Warns about x86-only CET options that were given when linking for another architecture.
+fn warn_ignored_x86_cet_options(args: &ElfArgs) {
+    for (given, option) in [
+        (args.z_ibt, "-z ibt"),
+        (args.z_ibtplt, "-z ibtplt"),
+        (args.force_ibt, "-z force-ibt"),
+        (
+            args.cet_report != crate::args::elf::CetReport::None,
+            "-z cet-report",
+        ),
+    ] {
+        if given {
+            args.warning(format!("{option} ignored"));
+        }
+    }
+}
+
 fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -> Result {
     let feature_bits = props
         .iter()
@@ -4864,7 +4885,10 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
                 "GNU_PROPERTY_X86_FEATURE_1_SHSTK",
             ),
         ] {
-            if feature_bits & bit == 0 {
+            // `-z ibt` marks the output as IBT-compatible anyway, so like bfd, don't report
+            // inputs that lack the IBT property.
+            let suppressed = bit == GNU_PROPERTY_X86_FEATURE_1_IBT && args.z_ibt;
+            if feature_bits & bit == 0 && !suppressed {
                 let msg = format!("{filename}: -z cet-report: file does not have {name} property");
                 match args.cet_report {
                     CetReport::Warning => args.warning(msg),
