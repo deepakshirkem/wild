@@ -4752,8 +4752,10 @@ impl LayoutExt {
         args: &ElfArgs,
     ) -> Result<Self> {
         let states = objects_iter(groups).map(|o| &o.format_specific);
+        // `-z ibt` and `-z force-ibt` are x86 options; the IBT property means nothing elsewhere.
+        let add_ibt = (args.force_ibt || args.z_ibt) && args.architecture() == Architecture::X86_64;
         let mut gnu_property_notes =
-            merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, args.force_ibt);
+            merge_gnu_property_notes::<C, A>(states.clone(), args.z_isa, add_ibt);
 
         merge_aarch64_build_attributes(states.clone(), &mut gnu_property_notes)?;
 
@@ -4878,7 +4880,7 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
     states: impl Iterator<Item = &'states ObjectLayoutStateExt<'data, C>>,
     isa_needed: Option<NonZeroU32>,
-    force_ibt: bool,
+    add_ibt: bool,
 ) -> Vec<GnuProperty> {
     timing_phase!("Merge GNU property notes");
 
@@ -4955,9 +4957,9 @@ fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
         })
         .collect_vec();
 
-    // Add IBT property if -z force-ibt is set, matching lld behavior.
-    // This is done after merging to ensure force-ibt overrides AND logic.
-    if force_ibt {
+    // Add the IBT property for -z ibt or -z force-ibt. This is done after merging so that it
+    // overrides the AND logic, matching bfd and lld.
+    if add_ibt {
         if let Some(prop) = output
             .iter_mut()
             .find(|p| p.ptype == GNU_PROPERTY_X86_FEATURE_1_AND)

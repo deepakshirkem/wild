@@ -132,6 +132,8 @@ pub struct ElfArgs {
     pub(crate) z_interpose: bool,
     pub(crate) z_isa: Option<NonZeroU32>,
     pub(crate) force_ibt: bool,
+    /// -z ibt: mark the output as compatible with Intel Indirect Branch Tracking.
+    pub(crate) z_ibt: bool,
     pub(crate) force_bti: bool,
     pub(crate) cet_report: CetReport,
     pub(crate) z_stack_size: Option<NonZeroU64>,
@@ -417,6 +419,7 @@ impl Default for ElfArgs {
             z_stack_size: None,
             z_isa: None,
             force_ibt: false,
+            z_ibt: false,
             force_bti: false,
             cet_report: CetReport::None,
             z_pack_relative_relocs: false,
@@ -922,6 +925,19 @@ fn setup_argument_parser() -> ArgumentParser<ElfArgs> {
                 Ok(())
             },
         )
+        .sub_option(
+            "ibt",
+            "Mark output as compatible with Intel Indirect Branch Tracking",
+            |args, _| {
+                args.z_ibt = true;
+                Ok(())
+            },
+        )
+        .sub_option("ibtplt", "Generate IBT-enabled PLT entries", |_, _| {
+            // Wild's x86-64 PLT entries always start with `endbr64`, so they're already
+            // IBT-enabled.
+            Ok(())
+        })
         .sub_option_with_value(
             "cet-report=",
             "Report missing CET properties",
