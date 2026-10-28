@@ -13,7 +13,9 @@ use crate::elf_writer;
 use crate::ensure;
 use crate::erratum843419::ErratumSectionInfo;
 use crate::erratum843419::erratum_section_info;
+use crate::error;
 use crate::error::Context as _;
+use crate::error::MultiErrorBuilder;
 use crate::error::Result;
 use crate::expression_eval;
 use crate::file_kind::FileKind;
@@ -4779,7 +4781,7 @@ impl LayoutExt {
         }
 
         if is_x86_64 && (args.force_ibt || args.cet_report != crate::args::elf::CetReport::None) {
-            let mut cet_errors = Vec::new();
+            let mut cet_errors = MultiErrorBuilder::new();
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
                 check_cet_properties(
@@ -4789,9 +4791,7 @@ impl LayoutExt {
                     &mut cet_errors,
                 );
             }
-            if !cet_errors.is_empty() {
-                bail!("{}", cet_errors.join("\n"));
-            }
+            cet_errors.emit_errors_if_any()?;
         }
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
         let eflags = merge_eflags::<C, A>(objects_iter(groups).map(|o| o.object))?;
@@ -4889,7 +4889,7 @@ fn check_cet_properties(
     filename: &str,
     props: &[GnuProperty],
     args: &ElfArgs,
-    errors: &mut Vec<String>,
+    errors: &mut MultiErrorBuilder,
 ) {
     let feature_bits = props
         .iter()
@@ -4922,7 +4922,7 @@ fn check_cet_properties(
                 let msg = format!("{filename}: -z cet-report: file does not have {name} property");
                 match args.cet_report {
                     CetReport::Warning => args.warning(msg),
-                    CetReport::Error => errors.push(msg),
+                    CetReport::Error => errors.add_error(error!("{msg}")),
                     CetReport::None => unreachable!(),
                 }
             }
