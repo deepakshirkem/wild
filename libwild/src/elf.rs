@@ -4882,9 +4882,7 @@ fn warn_ignored_x86_cet_options(args: &ElfArgs) {
     }
 }
 
-/// Reports the CET properties that `filename` lacks, for `-z force-ibt` and `-z cet-report`. With
-/// `-z cet-report=error`, messages are added to `errors` instead of failing immediately, so that
-/// every missing property in every file gets reported, like bfd and lld do.
+/// Reports the CET properties that `filename` lacks, for `-z force-ibt` and `-z cet-report`.
 fn check_cet_properties(
     filename: &str,
     props: &[GnuProperty],
