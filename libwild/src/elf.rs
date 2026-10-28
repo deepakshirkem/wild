@@ -4890,7 +4890,7 @@ fn check_cet_properties(
     props: &[GnuProperty],
     args: &ElfArgs,
     errors: &mut Vec<String>,
-) {    
+) {
     let feature_bits = props
         .iter()
         .find(|p| p.ptype == object::elf::GNU_PROPERTY_X86_FEATURE_1_AND)
