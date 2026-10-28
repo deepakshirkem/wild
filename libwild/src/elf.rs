@@ -4779,9 +4779,18 @@ impl LayoutExt {
         }
 
         if is_x86_64 && (args.force_ibt || args.cet_report != crate::args::elf::CetReport::None) {
+            let mut cet_errors = Vec::new();
             for obj in objects_iter(groups) {
                 let filename = obj.input.file.filename.to_string_lossy();
-                check_cet_properties(&filename, &obj.format_specific.gnu_property_notes, args)?;
+                check_cet_properties(
+                    &filename,
+                    &obj.format_specific.gnu_property_notes,
+                    args,
+                    &mut cet_errors,
+                );
+            }
+            if !cet_errors.is_empty() {
+                bail!("{}", cet_errors.join("\n"));
             }
         }
         let riscv_attributes = merge_riscv_attributes::<C, A>(states)?;
@@ -4873,7 +4882,15 @@ fn warn_ignored_x86_cet_options(args: &ElfArgs) {
     }
 }
 
-fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -> Result {
+/// Reports the CET properties that `filename` lacks, for `-z force-ibt` and `-z cet-report`. With
+/// `-z cet-report=error`, messages are added to `errors` instead of failing immediately, so that
+/// every missing property in every file gets reported, like bfd and lld do.
+fn check_cet_properties(
+    filename: &str,
+    props: &[GnuProperty],
+    args: &ElfArgs,
+    errors: &mut Vec<String>,
+) {    
     let feature_bits = props
         .iter()
         .find(|p| p.ptype == object::elf::GNU_PROPERTY_X86_FEATURE_1_AND)
@@ -4905,13 +4922,12 @@ fn check_cet_properties(filename: &str, props: &[GnuProperty], args: &ElfArgs) -
                 let msg = format!("{filename}: -z cet-report: file does not have {name} property");
                 match args.cet_report {
                     CetReport::Warning => args.warning(msg),
-                    CetReport::Error => bail!("{msg}"),
+                    CetReport::Error => errors.push(msg),
                     CetReport::None => unreachable!(),
                 }
             }
         }
     }
-    Ok(())
 }
 
 fn merge_gnu_property_notes<'states, 'data: 'states, C: ElfClass, A: Arch>(
