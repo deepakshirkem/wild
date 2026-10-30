@@ -1,6 +1,5 @@
-// Checked (non-_NC) MOVW relocations must fit in the bits the instruction sequence can build.
-// Wild didn't check the PC-relative and TLS ones, so an out-of-range value was silently
-// truncated. In-range values must still link.
+// Checked (non-_NC) PC-relative and TLS MOVW relocations must fit in the bits the instruction
+// sequence can build: out-of-range values are an error, and in-range values link.
 //#AbstractConfig:default
 //#Arch:aarch64
 //#Mode:static
